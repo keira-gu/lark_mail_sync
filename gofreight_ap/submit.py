@@ -269,6 +269,15 @@ def submit_one(page, row: ApRow, vendor: Dict[str, str], cfg: GfConfig,
             note = "同供应商发票号重复，已确认继续"
             _shot(page, cfg, f"{prefix}_04_dup_confirm")
             continue
+        if "已存在" in body and "确定要继续吗" in body:
+            # MBL（柜号）层级防重：该供应商在此 MBL 上已有应付单——本发票可能已被
+            # 专人挂在 MBL 层录过（TK 会计页看不到），绝不能自动点「继续」造成真重复。
+            # 截图留证、该行转人工：核对既有单后用 mark 补记，或确认无误再手工录。
+            _shot(page, cfg, f"{prefix}_04_mbl_dup")
+            hit = next((l.strip() for l in body.splitlines() if "已存在" in l), "")
+            _die(page, cfg, f"{prefix}_mbl_dup",
+                 f"MBL 层级防重弹窗，转人工核对（弹窗列的既有单里若有本发票号=已录过，"
+                 f"用 mark 补记勿重录）：{hit[:90]}")
     _shot(page, cfg, f"{prefix}_04_after_save")
     if not saved:
         body = page.inner_text("body")[:400].replace("\n", " | ")

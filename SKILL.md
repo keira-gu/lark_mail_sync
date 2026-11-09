@@ -182,6 +182,7 @@ python_venv/Scripts/python -m gofreight_ap --env-file .env submit --yes
 | 建立应付 FAIL_login 登录失败 | 密码错，或该账号在别的浏览器登录被互踢 | 核对 `.env` 三项；关掉别处的 GoFreight 登录再重跑失败的行 |
 | plan 清单里「服务商无映射」 | 管理员还没配这家的 GoFreight 编号 | 转告用户找管理员拿 search/code 配进 `GOFREIGHT_VENDOR_MAP`；绝不猜编号提交 |
 | 某行 FAIL_amt 金额对不上 | 表内摊分金额与 GoFreight 算出的不一致 | 该行转人工：保留截图（`runtime-outputs/gofreight/`），提醒用户核对表内数据，别反复重试 |
+| 某行失败提示「MBL 层级防重弹窗，转人工核对」 | 该供应商在此柜号（MBL）上已有应付单——本发票多半已被专人录过（挂在 MBL 层，TK 会计页看不到） | 把截图给用户核对：弹窗列的既有单里有本发票号=已录过 → `mark --invoice N --tk TK-x` 补记防重；确认没录过才人工在 GoFreight 录。**绝不点「继续」强存** |
 | 提交中提示「会话过期，重新登录」 | 正常（会话约 15 分钟过期，自动重登） | 无需处理；若重登也失败按 FAIL_login 排查 |
 | 想看「这轮会录什么」 | — | `sync` 用 `--dry-run`；建立应付直接 `plan`（本来就只读） |
 
