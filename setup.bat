@@ -58,6 +58,22 @@ if errorlevel 1 (
 )
 echo  [OK] Dependencies installed.
 
+rem ---------- 3b. optional component: GoFreight AP entry (playwright) ----------
+echo.
+echo  Installing optional GoFreight component (needs Chrome or Edge on this PC) ...
+"python_venv\Scripts\python" -m pip install -q -r requirements-gofreight.txt
+if errorlevel 1 (
+  echo  Default PyPI failed, retrying with Tsinghua mirror ...
+  "python_venv\Scripts\python" -m pip install -q -r requirements-gofreight.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+)
+if errorlevel 1 (
+  echo  [WARN] Optional GoFreight component NOT installed - mail sync still works.
+  echo         To use AP entry later, rerun setup.bat or run:
+  echo         python_venv\Scripts\pip install -r requirements-gofreight.txt
+) else (
+  echo  [OK] GoFreight component ready ^(needs Chrome or Edge installed^).
+)
+
 rem ---------- 4. offline self-test (no network needed) ----------
 echo.
 echo  Running offline self-test ...
