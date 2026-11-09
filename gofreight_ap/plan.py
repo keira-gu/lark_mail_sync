@@ -99,7 +99,6 @@ def rows_from_bitable(client, cfg) -> List[ApRow]:
 def build_plan(
     rows: Sequence[ApRow],
     submitted: Set[str],
-    vendor_map: Dict[str, Dict[str, str]],
     due_fallback_days: int = 0,
     invoices: Optional[Set[str]] = None,
     tks: Optional[Set[str]] = None,
@@ -107,7 +106,10 @@ def build_plan(
     """→ (待录, 跳过[(key, 原因)])。
 
     任何信息缺口的行都进跳过清单、绝不进待录（盲提交红线）。
-    DUE 缺失时：due_fallback_days>0 则按 开票日期+N 天 回退，否则跳过。"""
+    例外（2026-11-09 起）：供应商无映射不再拦截——submit 时在供应商下拉
+    自动解析（唯一候选且名称吻合才采用并缓存，失败该行转人工），见 vendors.py。
+    服务商名称为空仍跳过（无词可搜）。DUE 缺失时：due_fallback_days>0 则按
+    开票日期+N 天 回退，否则跳过。"""
     todo: List[ApRow] = []
     skipped: List[Tuple[str, str]] = []
     for r in rows:
@@ -124,8 +126,8 @@ def build_plan(
             why = "摊分金额缺失或为0"
         elif r.key in submitted:
             why = "已建立应付（state 记账）"
-        elif r.vendor not in vendor_map:
-            why = f"服务商无映射（在 .env 的 GOFREIGHT_VENDOR_MAP 配 search/code）：{r.vendor or '(空)'}"
+        elif not r.vendor:
+            why = "服务商名称为空"
         elif not r.invoice_date:
             why = "开票日期缺失"
         elif not r.due_date:

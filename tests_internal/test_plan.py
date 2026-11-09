@@ -3,7 +3,6 @@
 
 注意：本目录不放假 conftest.py——与 tests/conftest.py 同名无包名会互相顶掉
 （pytest 无 __init__.py 时按 basename 解析）。路径自举放在本文件内。"""
-import json
 import sys
 from datetime import date
 from pathlib import Path
@@ -16,9 +15,6 @@ if str(ROOT) not in sys.path:
 
 from gofreight_ap import ApRow, ApState, build_plan, ms_to_date, parse_vendor_map, rows_from_bitable  # noqa: E402
 from lark_mail_sync.invoice import date_to_ms  # noqa: E402
-
-VMAP = parse_vendor_map(json.dumps(
-    {"ABC Logistics": {"search": "ABC", "code": "VN-000001"}}, ensure_ascii=False))
 
 
 def row(**kw):
@@ -68,54 +64,60 @@ def test_vendor_map_incomplete_rejected():
 # ---------- build_plan 过滤矩阵 ----------
 
 def test_happy_path_into_todo():
-    todo, skipped = build_plan([row()], set(), VMAP)
+    todo, skipped = build_plan([row()], set())
     assert len(todo) == 1 and not skipped
     assert todo[0].key == "1001|TK-20990011"
 
 
 def test_skip_error_row():
-    todo, skipped = build_plan([row(error="未识别发票金额")], set(), VMAP)
+    todo, skipped = build_plan([row(error="未识别发票金额")], set())
     assert not todo and "异常未清" in skipped[0][1]
 
 
 def test_skip_missing_invoice_or_tk():
-    _, skipped = build_plan([row(invoice_no=""), row(tk="")], set(), VMAP)
+    _, skipped = build_plan([row(invoice_no=""), row(tk="")], set())
     assert {w for _, w in skipped} == {"缺发票号/TK"}
 
 
 def test_skip_zero_amount():
-    _, skipped = build_plan([row(amount=0)], set(), VMAP)
+    _, skipped = build_plan([row(amount=0)], set())
     assert "摊分金额缺失或为0" in skipped[0][1]
 
 
 def test_skip_already_submitted():
-    _, skipped = build_plan([row()], {"1001|TK-20990011"}, VMAP)
+    _, skipped = build_plan([row()], {"1001|TK-20990011"})
     assert "已建立应付" in skipped[0][1]
 
 
-def test_skip_unmapped_vendor():
-    _, skipped = build_plan([row(vendor="Northline Transport")], set(), VMAP)
-    assert "无映射" in skipped[0][1]
+def test_unmapped_vendor_into_todo_for_auto_resolve():
+    # 2026-11-09 起：无映射不再拦截——submit 时在供应商下拉自动解析（唯一吻合才采用）
+    todo, skipped = build_plan([row(vendor="Northline Transport")], set())
+    assert len(todo) == 1 and not skipped
+
+
+def test_skip_empty_vendor():
+    _, skipped = build_plan([row(vendor="")], set())
+    assert "服务商名称为空" in skipped[0][1]
 
 
 def test_skip_missing_invoice_date():
-    _, skipped = build_plan([row(invoice_date=None)], set(), VMAP)
+    _, skipped = build_plan([row(invoice_date=None)], set())
     assert "开票日期缺失" in skipped[0][1]
 
 
 def test_due_missing_skips_or_fallback():
     r = row(due_date=None)
-    _, skipped = build_plan([r], set(), VMAP)
+    _, skipped = build_plan([r], set())
     assert "DUE" in skipped[0][1]
-    todo, _ = build_plan([row(due_date=None)], set(), VMAP, due_fallback_days=30)
+    todo, _ = build_plan([row(due_date=None)], set(), due_fallback_days=30)
     assert todo and todo[0].due_date == date(2026, 11, 14)  # 10-15 + 30
 
 
 def test_filters_invoice_and_tk():
     rows = [row(), row(invoice_no="1002", tk="TK-20990012")]
-    todo, _ = build_plan(rows, set(), VMAP, invoices={"1002"})
+    todo, _ = build_plan(rows, set(), invoices={"1002"})
     assert [r.invoice_no for r in todo] == ["1002"]
-    todo, _ = build_plan(rows, set(), VMAP, tks={"TK-20990011"})
+    todo, _ = build_plan(rows, set(), tks={"TK-20990011"})
     assert [r.tk for r in todo] == ["TK-20990011"]
 
 

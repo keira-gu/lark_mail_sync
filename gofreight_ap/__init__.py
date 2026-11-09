@@ -8,8 +8,16 @@
 
 防重：gofreight_state.json 按「发票号|TK」记账，提交成功即落盘，重跑只处理未录行；
 提交前先查该 TK 会计页是否已有同发票号（他人手工已录 → 跳过防双录并记账）。
-供应商映射：GOFREIGHT_VENDOR_MAP（JSON），没配映射的服务商只进计划清单并注明原因，绝不盲提交。
+供应商编码：GOFREIGHT_VENDOR_MAP（JSON，人工确认优先）+ 自动解析缓存
+（gofreight_vendors.json）——无映射时 submit 在供应商下拉搜，唯一候选且名称
+吻合才采用并缓存（vendors.py），失败该行转人工，绝不瞎选。
 """
 from .plan import ApRow, ApState, build_plan, ms_to_date, parse_vendor_map, rows_from_bitable  # noqa: F401
+from .vendors import (VendorCache, derive_search_terms, match_vendor,  # noqa: F401
+                      merged_map, normalize_name, parse_candidate)
 
-__all__ = ["ApRow", "ApState", "build_plan", "ms_to_date", "parse_vendor_map", "rows_from_bitable"]
+__all__ = [
+    "ApRow", "ApState", "build_plan", "ms_to_date", "parse_vendor_map", "rows_from_bitable",
+    "VendorCache", "derive_search_terms", "match_vendor", "merged_map", "normalize_name",
+    "parse_candidate",
+]

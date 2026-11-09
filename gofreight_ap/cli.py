@@ -24,6 +24,7 @@ from lark_mail_sync.lark_client import LarkClient, LarkError
 
 from .plan import ApState, build_plan, parse_vendor_map, rows_from_bitable
 from .submit import GfConfig, run_batch
+from .vendors import VendorCache, merged_map
 
 
 def _gf(env: dict, key: str, default: str = "") -> str:
@@ -48,7 +49,8 @@ def _gather(args) -> tuple:
                               ("GOFREIGHT_FEE_CODE", fee_code)] if not v]
     if missing:
         raise ConfigError(f".env 缺 {missing}（GoFreight 建立应付需要）")
-    vendor_map = parse_vendor_map(_gf(raw, "GOFREIGHT_VENDOR_MAP"))
+    vendor_cache = VendorCache(_gf(raw, "GOFREIGHT_VENDOR_CACHE", "data/gofreight_vendors.json"))
+    vendor_map = merged_map(parse_vendor_map(_gf(raw, "GOFREIGHT_VENDOR_MAP")), vendor_cache)
     state = ApState(_gf(raw, "GOFREIGHT_STATE_PATH", "data/gofreight_state.json"))
     gfc = GfConfig(
         base_url=base.rstrip("/"), user=user, password=pwd,
@@ -56,17 +58,17 @@ def _gather(args) -> tuple:
         shot_dir=_gf(raw, "GOFREIGHT_SHOT_DIR", "runtime-outputs/gofreight"),
         browser_state=_gf(raw, "GOFREIGHT_BROWSER_STATE", "runtime-outputs/gofreight/state.json"),
     )
-    return cfg, vendor_map, state, gfc, raw
+    return cfg, vendor_map, state, gfc, raw, vendor_cache
 
 
 def _plan(args) -> int:
-    cfg, vendor_map, state, gfc, raw = _gather(args)
+    cfg, vendor_map, state, gfc, raw, vendor_cache = _gather(args)
     due_fallback = int(_gf(raw, "GOFREIGHT_DUE_FALLBACK_DAYS", "0"))
     invoices: Optional[Set[str]] = set(args.invoice) if args.invoice else None
     tks: Optional[Set[str]] = set(args.tk) if args.tk else None
 
     rows = rows_from_bitable(LarkClient(cfg), cfg)
-    todo, skipped = build_plan(rows, set(state.entries), vendor_map,
+    todo, skipped = build_plan(rows, set(state.entries),
                                due_fallback, invoices, tks)
     if args.limit:
         extra = todo[args.limit:]
@@ -76,13 +78,14 @@ def _plan(args) -> int:
     print(f"GoFreight 建立应付计划：待录 {len(todo)} 行，跳过 {len(skipped)} 行"
           f"（费用代码 {gfc.fee_code}，数量 1 × 单价=摊分金额）")
     for i, r in enumerate(todo, 1):
-        v = vendor_map[r.vendor]
-        print(f"  {i:2d}) 发票{r.invoice_no} | {r.tk} | {r.vendor}→{v['code']} "
+        v = vendor_map.get(r.vendor)
+        dest = v["code"] if v else "自动解析"
+        print(f"  {i:2d}) 发票{r.invoice_no} | {r.tk} | {r.vendor}→{dest} "
               f"| {r.amount:.2f} {r.currency} | 开票{r.invoice_date:%Y-%m-%d} "
               f"到期{r.due_date:%Y-%m-%d}")
     for key, why in skipped:
         print(f"   - {key} ：{why}")
-    return todo, skipped, state, gfc, vendor_map
+    return todo, skipped, state, gfc, vendor_map, vendor_cache
 
 
 def cmd_plan(args) -> int:
@@ -95,7 +98,7 @@ def cmd_submit(args) -> int:
         _plan(args)
         print("\n以上为计划，未提交。确认无误后加 --yes 执行（每行独立提交，失败自动跳下一行）。")
         return 0
-    todo, _skipped, state, gfc, vendor_map = _plan(args)
+    todo, _skipped, state, gfc, vendor_map, vendor_cache = _plan(args)
 
     def on_result(res) -> None:
         if res.ok:
@@ -108,7 +111,8 @@ def cmd_submit(args) -> int:
             })
             state.save()
 
-    results = run_batch(todo, vendor_map, gfc, submit=not args.dry, on_result=on_result)
+    results = run_batch(todo, vendor_map, gfc, submit=not args.dry, on_result=on_result,
+                        vendor_cache=vendor_cache)
     fails = [r for r in results if not r.ok]
     print(f"\n完成：成功 {len(results) - len(fails)}/{len(results)}；"
           f"失败 {len(fails)}（截图见 {gfc.shot_dir}/）")

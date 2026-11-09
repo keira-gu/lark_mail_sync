@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from .plan import ApRow
+from .vendors import VendorCache, derive_search_terms, match_vendor, parse_candidate
 
 
 class GoFreightStepError(Exception):
@@ -103,10 +104,53 @@ def _set_date(page, cfg: GfConfig, field_name: str, value: str) -> None:
              f"填入={inp.first.input_value()!r} 期望={value!r}")
 
 
-def submit_one(page, row: ApRow, vendor: Dict[str, str], cfg: GfConfig,
-               prefix: str, submit: bool = True) -> str:
+def _vendor_option_texts(page, term: str) -> List[str]:
+    """打开供应商下拉 → 输入搜索词 → 读候选文本列表 → 清词收起（不点选）。"""
+    page.locator(".ng-select-container").first.click()
+    page.wait_for_timeout(1200)
+    page.keyboard.type(term, delay=90)
+    page.wait_for_timeout(2500)
+    texts = [t.strip() for t in page.locator(".ng-option").all_inner_texts() if t.strip()]
+    for _ in range(len(term)):
+        page.keyboard.press("Backspace")
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(600)
+    return texts
+
+
+def _auto_resolve_vendor(page, row: ApRow, cfg: GfConfig, prefix: str,
+                         cache: Optional[VendorCache]) -> Dict[str, str]:
+    """无映射时自动解析供应商编码：按推导词逐个搜下拉，
+    唯一候选且名称吻合（归一化相等或互含）→ 采用并记入缓存；
+    歧义/对不上/搜不到 → 截图转人工，绝不瞎选。"""
+    detail = []
+    for term in derive_search_terms(row.vendor):
+        texts = _vendor_option_texts(page, term)
+        verdict, hit = match_vendor(row.vendor, [parse_candidate(t) for t in texts])
+        if verdict == "unique":
+            code, disp = hit
+            if cache is not None:
+                cache.put(row.vendor, term, code)
+                cache.save()
+            print(f"    供应商自动解析：{row.vendor} → {code}（候选 {disp!r}，已缓存）")
+            return {"search": term, "code": code}
+        if verdict == "ambiguous":
+            detail.append(f"搜 {term!r} 有多个吻合候选")
+            break  # 换词不会更准，直接转人工
+        detail.append(f"搜 {term!r} 无吻合候选（{len(texts)} 条）")
+    _die(page, cfg, f"{prefix}_vendor_resolve",
+         f"供应商无法唯一解析，转人工（在 .env GOFREIGHT_VENDOR_MAP 配 search/code 后重跑）"
+         f"：{row.vendor}；{'；'.join(detail)}")
+    raise AssertionError  # _die 必抛，这里仅为类型收尾
+
+
+def submit_one(page, row: ApRow, vendor: Optional[Dict[str, str]], cfg: GfConfig,
+               prefix: str, submit: bool = True,
+               vendor_cache: Optional[VendorCache] = None) -> str:
     """录一行。返回备注（如「已存在」提示）。失败抛 GoFreightStepError。
 
+    vendor=None 时在供应商下拉自动解析编码（唯一候选且名称吻合才采用并缓存，
+    失败转人工——录错供应商=挂错账，绝不瞎选）。
     日期口径：发布日期=发票日期=开票日期；到期=发票DUE date。"""
     mmdd = lambda d: d.strftime("%m-%d-%Y")  # noqa: E731 — 表单格式 MM-DD-YYYY
     url = (f"{cfg.base_url}/accounting/invoice/entry?mbl={row.tk}&type=B"
@@ -135,6 +179,8 @@ def submit_one(page, row: ApRow, vendor: Dict[str, str], cfg: GfConfig,
     page.wait_for_timeout(2000)
 
     # 供应商（ng-select 服务端搜索：只能打无空格短词）
+    if vendor is None:
+        vendor = _auto_resolve_vendor(page, row, cfg, prefix, vendor_cache)
     page.locator(".ng-select-container").first.click()
     page.wait_for_timeout(1200)
     vopt = page.locator(f".ng-option:has-text('{vendor['code']}')")
@@ -300,8 +346,11 @@ def submit_one(page, row: ApRow, vendor: Dict[str, str], cfg: GfConfig,
 
 def run_batch(rows: List[ApRow], vendor_map: Dict[str, Dict[str, str]], cfg: GfConfig,
               submit: bool = True,
-              on_result: Optional[Callable[[RowResult], None]] = None) -> List[RowResult]:
-    """一个浏览器会话顺序录完所有行；单行失败截图记错、继续下一行。"""
+              on_result: Optional[Callable[[RowResult], None]] = None,
+              vendor_cache: Optional[VendorCache] = None) -> List[RowResult]:
+    """一个浏览器会话顺序录完所有行；单行失败截图记错、继续下一行。
+
+    vendor_map 取不到的行（无映射）→ submit_one 里自动解析并写 vendor_cache。"""
     from playwright.sync_api import sync_playwright  # 延迟 import：plan/测试不需要
 
     results: List[RowResult] = []
@@ -320,7 +369,8 @@ def run_batch(rows: List[ApRow], vendor_map: Dict[str, Dict[str, str]], cfg: GfC
             prefix = f"{i:02d}_inv{row.invoice_no}_{row.tk.replace('-', '')}"
             res = RowResult(row=row, ok=False)
             try:
-                note = submit_one(page, row, vendor_map[row.vendor], cfg, prefix, submit)
+                note = submit_one(page, row, vendor_map.get(row.vendor), cfg, prefix,
+                                  submit, vendor_cache)
                 res.ok, res.note = True, note
                 print(f"  [{i}/{len(rows)}] {row.key} → OK {note}")
             except GoFreightStepError as e:

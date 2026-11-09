@@ -22,8 +22,9 @@ agent_created: true
 7. **建立应付必须两段式**：先跑 `plan` 把清单（发票号/TK/供应商/金额/日期）给用户看，
    **用户明确回复确认后才**执行 `submit --yes`。用户只说「建立应付」= 只出计划等确认，
    绝不自行加 `--yes`。
-8. **绝不提交无供应商映射的行**。plan 清单里注明「无映射」的服务商，说明管理员还没配
-   GoFreight 编号——转告用户找管理员，绝不猜编号、绝不绕过。
+8. **绝不猜供应商编号**。无映射的行 submit 时会在供应商下拉里自动解析（唯一候选且
+   名称吻合才采用，结果缓存进 `data/gofreight_vendors.json` 下次直用）；解析不出/多个
+   候选吻合 → 该行自动转人工（截图留证），转告用户找管理员拿编号，绝不猜、绝不绕过。
 9. **`data/gofreight_state.json` 是建立应付防重账本，绝不删除**。删了会重复建立应付。
 10. **submit 期间该 GoFreight 账号不能在别处登录**（单会话互踢）。开始提交前提醒用户
     关掉其他浏览器里登录的 GoFreight；提交中提示「重新登录」属正常（约 15 分钟过期自动重登）。
@@ -160,9 +161,9 @@ python_venv/Scripts/python -m gofreight_ap --env-file .env submit --yes
   同名邮件无附件等。落表后由人工在多维表里补，详见 `references/录入口径.md`。
 - 每行都会写「消息ID」列（系统幂等列，用户界面上通常已隐藏，别当成脏数据删掉——
   rebuild-state 靠它恢复游标）。
-- `gofreight_ap plan` 输出 = 待录清单（发票号 | TK | 供应商→编号 | 金额币种 | 开票/到期日）
-  + 跳过清单及原因（已建立应付 / 服务商无映射 / 表内异常未清 / 缺发票号TK / 摊分金额缺失 /
-  开票日期缺失 / DUE 缺失）。**跳过是保护，不是故障**；「无映射」转管理员。
+- `gofreight_ap plan` 输出 = 待录清单（发票号 | TK | 供应商→编号或「自动解析」 | 金额币种 |
+  开票/到期日）+ 跳过清单及原因（已建立应付 / 表内异常未清 / 缺发票号TK / 摊分金额缺失 /
+  开票日期缺失 / DUE 缺失 / 服务商名称为空）。**跳过是保护，不是故障**。
 - `gofreight_ap submit --yes`：每行成功即记入防重账本；失败行自动截图
   `runtime-outputs/gofreight/FAIL_*.png` 并继续下一行，结束后汇总「成功 X/N」。
   出现「会计页已有该发票号…跳过防双录」= 别人已手工录过，正常跳过并记账。
@@ -183,7 +184,7 @@ python_venv/Scripts/python -m gofreight_ap --env-file .env submit --yes
 | 输出中文乱码 | 控制台代码页 | 运行前 `chcp 65001`；双击 `sync.bat` 已内置 |
 | 建立应付报 playwright 缺失 | 可选组件没装上 | `python_venv\Scripts\pip install -r requirements-gofreight.txt`（需本机有 Chrome/Edge） |
 | 建立应付 FAIL_login 登录失败 | 密码错，或该账号在别的浏览器登录被互踢 | 核对 `.env` 三项；关掉别处的 GoFreight 登录再重跑失败的行 |
-| plan 清单里「服务商无映射」 | 管理员还没配这家的 GoFreight 编号 | 转告用户找管理员拿 search/code 配进 `GOFREIGHT_VENDOR_MAP`；绝不猜编号提交 |
+| plan 清单里「自动解析」 / submit 报「供应商无法唯一解析」 | 新供应商没配过 GoFreight 编号 | submit 会先在供应商下拉自动搜：唯一吻合即采用并缓存（`data/gofreight_vendors.json`）；报失败说明多家相似或搜不到，转告用户找管理员拿 search/code 配进 `GOFREIGHT_VENDOR_MAP`；绝不猜编号提交 |
 | 某行 FAIL_amt 金额对不上 | 表内摊分金额与 GoFreight 算出的不一致 | 该行转人工：保留截图（`runtime-outputs/gofreight/`），提醒用户核对表内数据，别反复重试 |
 | 某行失败提示「MBL 层级防重弹窗，转人工核对」 | 该供应商在此柜号（MBL）上已有应付单——本发票多半已被专人录过（挂在 MBL 层，TK 会计页看不到） | 把截图给用户核对：弹窗列的既有单里有本发票号=已录过 → `mark --invoice N --tk TK-x` 补记防重；确认没录过才人工在 GoFreight 录。**绝不点「继续」强存** |
 | 提交中提示「会话过期，重新登录」 | 正常（会话约 15 分钟过期，自动重登） | 无需处理；若重登也失败按 FAIL_login 排查 |
