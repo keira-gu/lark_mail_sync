@@ -111,16 +111,22 @@ def submit_one(page, row: ApRow, vendor: Dict[str, str], cfg: GfConfig,
     mmdd = lambda d: d.strftime("%m-%d-%Y")  # noqa: E731 — 表单格式 MM-DD-YYYY
     url = (f"{cfg.base_url}/accounting/invoice/entry?mbl={row.tk}&type=B"
            f"&next=/truck/shipment/accounting/{row.tk}")
-    # 预检：先看该 TK 会计页是否已有同发票号（专人手工已录→跳过防双录，记账本）
+    # 预检：先看该 TK 会计页是否已有同发票号（专人手工已录→跳过防双录，记账本）。
+    # 发票号同时搜「去 INV- 前缀」形态（专人常不带前缀录入，只搜原样会漏），
+    # 且要求供应商名首词同行命中，避免纯数字发票号误撞其他数字。
     acct = f"{cfg.base_url}/truck/shipment/accounting/{row.tk}/"
     _ensure_logged_in(page, cfg, acct)
     page.wait_for_timeout(6000)
     b_pre = page.inner_text("body")
-    if row.invoice_no in b_pre:
-        hit_line = next((l.strip() for l in b_pre.splitlines()
-                         if row.invoice_no in l), "")[:90]
-        _shot(page, cfg, f"{prefix}_00_precheck_exists")
-        return f"会计页已有该发票号（可能专人已录），跳过防双录：{hit_line}"
+    needles = [row.invoice_no]
+    if row.invoice_no.upper().startswith("INV-") and len(row.invoice_no) > 4:
+        needles.append(row.invoice_no[4:])
+    vword = row.vendor.split()[0].upper() if row.vendor.split() else ""
+    for line in b_pre.splitlines():
+        if vword and vword in line.upper() and any(n in line for n in needles):
+            _shot(page, cfg, f"{prefix}_00_precheck_exists")
+            return (f"会计页已有该发票号（可能专人已录，发票号或无 INV- 前缀），"
+                    f"跳过防双录：{line.strip()[:90]}")
     _ensure_logged_in(page, cfg, url)
     try:
         page.wait_for_selector(".ng-select-container", timeout=30000)
