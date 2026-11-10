@@ -141,6 +141,7 @@ class FakeCfg:
     field_invoice_due = "发票DUE date"
     field_error = "异常报错"
     field_subject = "邮件主题"
+    field_invoice_file = "发票"
 
 
 def test_rows_from_bitable_shapes():

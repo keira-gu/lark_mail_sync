@@ -11,6 +11,9 @@
 供应商编码：GOFREIGHT_VENDOR_MAP（JSON，人工确认优先）+ 自动解析缓存
 （gofreight_vendors.json）——无映射时 submit 在供应商下拉搜，唯一候选且名称
 吻合才采用并缓存（vendors.py），失败该行转人工，绝不瞎选。
+发票备忘录（2026-11-10 起）：应付成功后在该 TK 会计页「备忘录」区建「标题=发票号」
+备忘录并上传多维表「发票」附件列的 PDF（memo.py，控件当日实弹定稿）；失败不影响
+应付记账，`gofreight_ap memo --yes` 可补传，多 TK 摊分发票每个 TK 各挂一份。
 """
 from .plan import ApRow, ApState, build_plan, ms_to_date, parse_vendor_map, rows_from_bitable  # noqa: F401
 from .vendors import (VendorCache, derive_search_terms, match_vendor,  # noqa: F401

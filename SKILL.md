@@ -146,6 +146,7 @@ python_venv/Scripts/python -m gofreight_ap --env-file .env submit --yes
 | `gofreight_ap submit` | 不带 `--yes` 时同样只出计划 | 想再看一遍清单时 |
 | `gofreight_ap submit --yes` | **逐行真提交**（每行独立，失败自动跳下一行并截图） | 用户确认计划之后 |
 | `gofreight_ap submit --yes --dry` | 只填表单不点储存（联调） | 几乎不用 |
+| `gofreight_ap memo` | 给**已记账**的行补传发票备忘录（不带 `--yes` 只出计划；不动应付） | submit 时备忘录失败的行、补历史欠账时 |
 | `gofreight_ap mark --invoice N --tk TK-x` | 手工补记「已建立应付」进防重账本 | 管理员告知某笔已录过时 |
 | 命令前加全局 `--dry-run`（lark_mail_sync）/ 过滤参数 `--invoice`/`--tk`/`--limit`（gofreight_ap） | 只打印将做什么 / 缩小本轮范围 | 业务想先看一眼或分批录时 |
 
@@ -167,6 +168,10 @@ python_venv/Scripts/python -m gofreight_ap --env-file .env submit --yes
 - `gofreight_ap submit --yes`：每行成功即记入防重账本；失败行自动截图
   `runtime-outputs/gofreight/FAIL_*.png` 并继续下一行，结束后汇总「成功 X/N」。
   出现「会计页已有该发票号…跳过防双录」= 别人已手工录过，正常跳过并记账。
+- **发票备忘录（自动）**：submit 每行建立应付成功后，会在该 TK 会计页「备忘录」区建
+  「标题=发票号」的条目并上传多维表「发票」附件列的 PDF（多 TK 摊分每 TK 各一份；
+  目标文件已挂过的不重传）。**备忘录失败不影响应付记账**——汇总里会列「备忘录未传」
+  清单，跑 `gofreight_ap memo --yes` 补传即可；多维表无附件列取值的行自动跳过备忘录。
 
 ## 七、故障手册
 
@@ -188,6 +193,7 @@ python_venv/Scripts/python -m gofreight_ap --env-file .env submit --yes
 | 某行 FAIL_amt 金额对不上 | 表内摊分金额与 GoFreight 算出的不一致 | 该行转人工：保留截图（`runtime-outputs/gofreight/`），提醒用户核对表内数据，别反复重试 |
 | 某行失败提示「MBL 层级防重弹窗，转人工核对」 | 该供应商在此柜号（MBL）上已有应付单——本发票多半已被专人录过（挂在 MBL 层，TK 会计页看不到） | 把截图给用户核对：弹窗列的既有单里有本发票号=已录过 → `mark --invoice N --tk TK-x` 补记防重；确认没录过才人工在 GoFreight 录。**绝不点「继续」强存** |
 | 提交中提示「会话过期，重新登录」 | 正常（会话约 15 分钟过期，自动重登） | 无需处理；若重登也失败按 FAIL_login 排查 |
+| 汇总出现「备忘录未传 N 行」 | 备忘录环节失败（**应付本身已成立，记账不受影响**） | 跑 `gofreight_ap memo --yes` 补传（已传过的不重传）；仍失败的行看 `runtime-outputs/gofreight/` 截图转人工，别反复重试 |
 | 想看「这轮会录什么」 | — | `sync` 用 `--dry-run`；建立应付直接 `plan`（本来就只读） |
 
 ## 八、数据口径

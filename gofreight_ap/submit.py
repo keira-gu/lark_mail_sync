@@ -41,6 +41,8 @@ class RowResult:
     msg: str = ""
     note: str = ""
     shots: List[str] = field(default_factory=list)
+    memo_ok: Optional[bool] = None   # None=未尝试（无附件/dry）；True/False=备忘录结果
+    memo_note: str = ""
 
 
 def _shot_dir(cfg: GfConfig) -> Path:
@@ -347,10 +349,13 @@ def submit_one(page, row: ApRow, vendor: Optional[Dict[str, str]], cfg: GfConfig
 def run_batch(rows: List[ApRow], vendor_map: Dict[str, Dict[str, str]], cfg: GfConfig,
               submit: bool = True,
               on_result: Optional[Callable[[RowResult], None]] = None,
-              vendor_cache: Optional[VendorCache] = None) -> List[RowResult]:
+              vendor_cache: Optional[VendorCache] = None,
+              memo_ctx=None) -> List[RowResult]:
     """一个浏览器会话顺序录完所有行；单行失败截图记错、继续下一行。
 
-    vendor_map 取不到的行（无映射）→ submit_one 里自动解析并写 vendor_cache。"""
+    vendor_map 取不到的行（无映射）→ submit_one 里自动解析并写 vendor_cache。
+    memo_ctx 提供时：应付成功且该行有附件 → 紧接着在该 TK 会计页上传发票备忘录
+    （失败只标注不回滚——应付已成立，可用 gofreight_ap memo 补传）。"""
     from playwright.sync_api import sync_playwright  # 延迟 import：plan/测试不需要
 
     results: List[RowResult] = []
@@ -373,6 +378,15 @@ def run_batch(rows: List[ApRow], vendor_map: Dict[str, Dict[str, str]], cfg: GfC
                                   submit, vendor_cache)
                 res.ok, res.note = True, note
                 print(f"  [{i}/{len(rows)}] {row.key} → OK {note}")
+                if submit and memo_ctx is not None and row.invoice_files:
+                    from .memo import upload_memo  # 延迟 import：无需 memo 时零依赖
+                    try:
+                        res.memo_note = upload_memo(page, row, memo_ctx, cfg, prefix)
+                        res.memo_ok = True
+                    except GoFreightStepError as e:
+                        res.memo_ok = False
+                        res.memo_note = f"{e.step}: {e.msg}"
+                        print(f"    备忘录失败 @{e.step} {e.msg}（应付已成立，可 memo 子命令补传）")
             except GoFreightStepError as e:
                 res.step, res.msg = e.step, e.msg
                 print(f"  [{i}/{len(rows)}] {row.key} → 失败@{e.step} {e.msg}")

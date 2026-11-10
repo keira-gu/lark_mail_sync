@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """内部命令行（python -m gofreight_ap，项目根目录运行）：
   plan                          读多维表 → 打印待录/跳过清单（默认）
-  submit [--yes] [...]          真正提交（缺 --yes 时只出计划，红线）
+  submit [--yes] [...]          真正提交（缺 --yes 时只出计划，红线）；成功后自动传发票备忘录
+  memo [--yes] [--tk/--invoice] 给已记账的行补传发票备忘录（应付不动）
   mark --invoice N --tk TK      手工补记「已建立应付」（防重）
 """
 from __future__ import annotations
@@ -11,6 +12,7 @@ import io
 import os
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import List, Optional, Set
 
 try:  # Windows 控制台中文
@@ -99,25 +101,78 @@ def cmd_submit(args) -> int:
         print("\n以上为计划，未提交。确认无误后加 --yes 执行（每行独立提交，失败自动跳下一行）。")
         return 0
     todo, _skipped, state, gfc, vendor_map, vendor_cache = _plan(args)
+    cfg, _raw = load_all(args.env_file)
+    from .memo import MemoCtx
+    memo_ctx = MemoCtx(client=LarkClient(cfg), cfg=cfg,
+                       att_dir=Path(_gf(_raw, "GOFREIGHT_ATTACHMENT_DIR",
+                                        "runtime-outputs/gofreight/attachments")))
 
     def on_result(res) -> None:
         if res.ok:
             r = res.row
-            state.mark(r.key, {
+            info = {
                 "invoice_no": r.invoice_no, "tk": r.tk, "amount": r.amount,
                 "currency": r.currency, "fee_code": gfc.fee_code,
                 "record_id": r.record_id, "note": res.note,
                 "submitted_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            })
+            }
+            if res.memo_ok is not None:
+                info["memo_ok"], info["memo_note"] = res.memo_ok, res.memo_note
+            state.mark(r.key, info)
             state.save()
 
     results = run_batch(todo, vendor_map, gfc, submit=not args.dry, on_result=on_result,
-                        vendor_cache=vendor_cache)
+                        vendor_cache=vendor_cache, memo_ctx=memo_ctx)
     fails = [r for r in results if not r.ok]
-    print(f"\n完成：成功 {len(results) - len(fails)}/{len(results)}；"
+    memo_fails = [r for r in results if r.memo_ok is False]
+    print(f"\n完成：应付成功 {len(results) - len(fails)}/{len(results)}；"
           f"失败 {len(fails)}（截图见 {gfc.shot_dir}/）")
     for r in fails:
         print(f"  失败 {r.row.key} @{r.step} {r.msg}")
+    if memo_fails:
+        print(f"备忘录未传 {len(memo_fails)} 行（应付已成立，跑 `gofreight_ap memo --yes` 补传）：")
+        for r in memo_fails:
+            print(f"  备忘录 {r.row.key} {r.memo_note}")
+    return 1 if fails else 0
+
+
+def cmd_memo(args) -> int:
+    """给已建立应付（防重账本在册）的行补传发票备忘录；--tk/--invoice 可指定行。"""
+    cfg, _raw = load_all(args.env_file)
+    client = LarkClient(cfg)
+    state = ApState(_gf(_raw, "GOFREIGHT_STATE_PATH", "data/gofreight_state.json"))
+    rows = rows_from_bitable(client, cfg)
+    if args.tk:
+        rows = [r for r in rows if r.tk in set(args.tk)]
+    if args.invoice:
+        rows = [r for r in rows if r.invoice_no in set(args.invoice)]
+    rows = [r for r in rows if state.is_submitted(r.key)]   # 只补已记账的，绝不绕过防重
+    with_files = [r for r in rows if r.invoice_files]
+    no_files = [r for r in rows if not r.invoice_files]
+    print(f"备忘录补传计划：{len(rows)} 行在册，其中 {len(with_files)} 行有发票附件"
+          f"{f'，{len(no_files)} 行无附件跳过' if no_files else ''}")
+    for i, r in enumerate(with_files, 1):
+        files = ", ".join(a.get("name", "?") for a in r.invoice_files)
+        print(f"  {i:2d}) {r.key} ← {files}")
+    if not with_files:
+        return 0
+    if not args.yes:
+        print("\n以上为计划，未执行。确认后加 --yes（只传备忘录，不动应付）。")
+        return 0
+    gfc = GfConfig(
+        base_url=_gf(_raw, "GOFREIGHT_BASE_URL").rstrip("/"), user=_gf(_raw, "GOFREIGHT_USER"),
+        password=_gf(_raw, "GOFREIGHT_PASSWORD"), fee_code=_gf(_raw, "GOFREIGHT_FEE_CODE"),
+        shot_dir=_gf(_raw, "GOFREIGHT_SHOT_DIR", "runtime-outputs/gofreight"),
+        browser_state=_gf(_raw, "GOFREIGHT_BROWSER_STATE", "runtime-outputs/gofreight/state.json"))
+    from .memo import MemoCtx, run_memo_batch
+    memo_ctx = MemoCtx(client=client, cfg=cfg,
+                       att_dir=Path(_gf(_raw, "GOFREIGHT_ATTACHMENT_DIR",
+                                        "runtime-outputs/gofreight/attachments")))
+    results = run_memo_batch(with_files, gfc, memo_ctx)
+    fails = [r for r in results if not r["ok"]]
+    print(f"\n备忘录完成：成功 {len(results) - len(fails)}/{len(results)}")
+    for r in fails:
+        print(f"  失败 {r['row'].key} {r['note']}")
     return 1 if fails else 0
 
 
@@ -154,10 +209,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     sp.add_argument("--tk", required=True)
     sp.add_argument("--note", default="")
 
+    sp = sub.add_parser("memo", help="给已记账的行补传发票备忘录")
+    sp.add_argument("--yes", action="store_true", help="确认执行（缺省只出计划）")
+    _add_filters(sp)
+
     args = p.parse_args(argv)
     try:
-        return {"plan": cmd_plan, "submit": cmd_submit, "mark": cmd_mark}.get(
-            args.cmd, cmd_plan)(args)
+        return {"plan": cmd_plan, "submit": cmd_submit, "mark": cmd_mark,
+                "memo": cmd_memo}.get(args.cmd, cmd_plan)(args)
     except (ConfigError, ValueError) as e:
         print(f"配置错误：{e}")
         return 2

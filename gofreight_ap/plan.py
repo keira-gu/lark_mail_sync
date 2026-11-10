@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
@@ -25,6 +25,8 @@ class ApRow:
     due_date: Optional[date]
     error: str = ""
     subject: str = ""
+    # 「发票」附件列原始取值：[{file_token, name, size, ...}]（无附件=空）
+    invoice_files: List[Dict] = field(default_factory=list)
 
     @property
     def key(self) -> str:
@@ -92,6 +94,8 @@ def rows_from_bitable(client, cfg) -> List[ApRow]:
             due_date=ms_to_date(f.get(cfg.field_invoice_due)),
             error=txt(f.get(cfg.field_error)).strip(),
             subject=txt(f.get(cfg.field_subject)).strip(),
+            invoice_files=[a for a in (f.get(cfg.field_invoice_file) or [])
+                           if isinstance(a, dict) and a.get("file_token")],
         ))
     return rows
 
