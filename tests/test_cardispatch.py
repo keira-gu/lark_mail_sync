@@ -288,6 +288,24 @@ def test_discover_statement_path(tmp_path, monkeypatch):
         discover_statement_path([tmp_path / "empty"])
 
 
+def test_partition_rows_by_tk():
+    """v1.6.0 多页签切片：同 TK 多行（多供应商共票）必须落同一 worker。"""
+    from gofreight_ap.cardispatch import partition_rows_by_tk
+    rows = [StmtRow(1, "A", "TK-1", "USD", 1, "", ""),
+            StmtRow(2, "B", "TK-1", "USD", 2, "", ""),   # 共 TK 同组
+            StmtRow(3, "C", "TK-2", "USD", 3, "", ""),
+            StmtRow(4, "D", "TK-3", "USD", 4, "", "")]
+    buckets = partition_rows_by_tk(rows, 2)
+    assert len(buckets) == 2
+    same = [b for b in buckets if any(r.tk == "TK-1" for r in b)]
+    assert len(same) == 1                                # TK-1 全部落同一桶
+    assert sum(1 for r in same[0] if r.tk == "TK-1") == 2  # 两行都不拆开
+    assert sorted(len(b) for b in buckets) == [1, 3]     # 组间轮转：TK-1(2行)+TK-3 vs TK-2
+    assert partition_rows_by_tk(rows, 1) == [rows]
+    assert partition_rows_by_tk(rows, 99) != [rows]      # worker 数被行数截断，仍分组
+    assert partition_rows_by_tk([], 3) == [[]]
+
+
 def test_archive_pdf_idempotent(tmp_path):
     """全局内容去重（用户口径：不要重复发票）——同一份发票全目录只存一份。"""
     from gofreight_ap.cardispatch import archive_pdf, preload_seen

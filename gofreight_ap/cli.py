@@ -224,7 +224,7 @@ def cmd_cardispatch(args) -> int:
         return 0
 
     # 附件只从 GoFreight 取（用户口径）：会计页「文件中心」优先 → 备忘录兜底
-    results = run_cardispatch(rows, gfc, args.out)
+    results = run_cardispatch(rows, gfc, args.out, workers=max(1, args.workers))
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     report = write_report(results, rows, Path(f"runtime-outputs/cardispatch/卡派对账清单_{ts}.xlsx"))
     n = lambda s: sum(1 for r in results if r["status"] == s)  # noqa: E731
@@ -282,6 +282,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "也可给文件名或完整路径）")
     sp.add_argument("--yes", action="store_true", help="确认执行（缺省只出计划）")
     sp.add_argument("--out", default="D:/卡派发票", help="附件归档目录（默认 D:/卡派发票）")
+    sp.add_argument("--workers", type=int, default=1,
+                    help="并发页签数（默认 1=单页签；2~3 需先 --limit 小批实测通过再用）")
     sp.add_argument("--probe", action="store_true",
                     help="单 TK dump 应付区/附件原始字段（控件定稿用，需配 --tk）")
     _add_filters(sp)

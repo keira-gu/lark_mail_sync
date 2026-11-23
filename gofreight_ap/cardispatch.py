@@ -554,161 +554,301 @@ class CardiCtx:
     att_dir: Path = None
 
 
+def partition_rows_by_tk(rows: List[StmtRow], workers: int) -> List[List[StmtRow]]:
+    """按 TK 分组轮转切片（多页签并发用，v1.6.0）：同 TK 多行（多供应商共票）落同一
+    worker，会计页/文档页/备忘录缓存零跨线程共享。workers<=1 返回单桶（原顺序）。"""
+    n = max(1, min(workers, len(rows) or 1))
+    if n <= 1:
+        return [list(rows)]
+    groups: Dict[str, List[StmtRow]] = {}
+    for r in rows:
+        groups.setdefault(r.tk, []).append(r)
+    buckets: List[List[StmtRow]] = [[] for _ in range(n)]
+    for i, g in enumerate(groups.values()):
+        buckets[i % n].extend(g)
+    return buckets
+
+
+def _ensure_logged_in_mt(page, bctx, gfc, url, state_path, wid,
+                         login_lock, state_lock) -> None:
+    """多页签版登录守卫（v1.6.0）：撞到登录页时——先在锁内吃别人刚救回的 Cookie
+    重试；仍不行才自己登录并落盘。锁保证同一时刻只有一个 worker 在登录，杜绝
+    「新登录挤掉彼此会话」的自踢死循环。单页签模式不用它（走 submit._ensure_logged_in）。"""
+    import json
+    from .submit import _die
+    page.goto(url, wait_until="domcontentloaded", timeout=45000)
+    if "/login/" not in page.url:
+        return
+    with login_lock:
+        if state_path.exists():   # 别的 worker 可能刚登录落盘——先吃它的 Cookie
+            try:
+                cookies = json.loads(state_path.read_text(encoding="utf-8")).get("cookies", [])
+                bctx.clear_cookies()
+                bctx.add_cookies(cookies)
+                page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                if "/login/" not in page.url:
+                    return
+            except Exception:  # noqa: BLE001 — Cookie 没救回来就走自己的登录
+                pass
+        print(f"    [w{wid}] 会话过期，重新登录…")
+        page.wait_for_timeout(3000)
+        page.fill("input[name='username']", gfc.user)
+        page.fill("input[name='password']", gfc.password)
+        page.wait_for_timeout(500)
+        page.keyboard.press("Enter")
+        page.wait_for_timeout(8000)
+        if "/login/" in page.url:
+            _die(page, gfc, "login", "登录未成功（账号密码？互踢？）")
+        page.goto(url, wait_until="domcontentloaded", timeout=45000)
+        with state_lock:
+            try:
+                bctx.storage_state(path=state_path)
+            except Exception:
+                pass
+
+
+def _process_row(page, bctx, gfc, row: StmtRow, prefix: str, day, out: Path,
+                 used: set, seen: Dict, acct_cache: Dict, doc_cache: Dict,
+                 pdf_text_cache: Dict, login_fn, wid: int = 0,
+                 archive_lock=None) -> Dict:
+    """单行：读应付区核对金额 → 附件归档。login_fn(page, url)=带登录守卫的跳转。
+    单行失败转 FAIL 结果不抛出（批次不终止）。"""
+    from .submit import _shot
+    r: Dict = {"tk": row.tk, "row_no": row.row_no, "vendor": row.vendor,
+               "stmt_amount": row.amount, "currency": row.currency,
+               "status": "", "note": "", "invoices": "", "gf_amount": None,
+               "files": []}
+    try:
+        cached = acct_cache.get(row.tk)
+        if cached is not None:
+            picked = cached["picked"]   # 同 TK 多行（多供应商共票）整段复用，不再访问页面
+        else:
+            acct = f"{gfc.base_url}/truck/shipment/accounting/{row.tk}/"
+            login_fn(page, acct)
+            picked = None
+            deadline = time.time() + 8  # 表格异步渲染：就绪即走（v1.5.7，原固定 6s+3×2.5s）
+            while picked is None and time.time() < deadline:
+                picked = pick_bills_table(page.evaluate(_JS_SCAN))
+                if picked is None:
+                    page.wait_for_timeout(700)
+            acct_cache[row.tk] = {"picked": picked, "memo_docs": None}
+        bills = (picked or {}).get("bills") or []
+        if picked is None:
+            r["status"] = "READ_FAIL"
+            r["note"] = "账单行未定位（无「成本(应付)」行，跑 --probe 看结构）"
+        elif not bills:
+            r["status"] = "NO_BILL"
+            r["note"] = "账单表无应付行（未建立应付？转人工核对）"
+        else:
+            # 多供应商共 TK（2026-11-19 实跑实证：单柜 8 家各一笔）：
+            # 只合计本行供应商的账单核对，其余供应商的账不掺进来
+            mine = [b for b in bills if vendor_match(b.get("vendor"), row.vendor)]
+            others = len(bills) - len(mine)
+            if not mine:
+                r["status"] = "NO_BILL"
+                r["note"] = (f"该 TK 有 {len(bills)} 笔账单但无本供应商"
+                             f"（{row.vendor}）的——转人工核对")
+            else:
+                total = round(sum(b["amount"] or 0 for b in mine), 2)
+                r["invoices"] = ";".join(b["invoice_no"] for b in mine)
+                r["gf_amount"] = total
+                verdict = check_amount(total, row.amount)
+                r["status"] = verdict if verdict in ("OK", "MISMATCH") else "NO_AMOUNT"
+                if verdict == "MISMATCH":
+                    r["note"] = f"金额不符：{row.vendor} 在 GoFreight {total:.2f} vs 明细 {row.amount:.2f} {row.currency}"
+                # 交叉校验（单笔时）：GoFreight 发票号 vs Excel D/C 号（模糊匹配：
+                # 短号/去INV前缀互含算匹配），不一致只标注不判死
+                if len(mine) == 1 and row.dc_no and \
+                        not invoice_no_match(mine[0]["invoice_no"], row.dc_no):
+                    r["note"] = (r["note"] + "；" if r["note"] else "") + \
+                        f"发票号不一致：GoFreight {mine[0]['invoice_no']} vs 明细D/C {row.dc_no}"
+                if others:
+                    r["note"] = (r["note"] + "；" if r["note"] else "") + \
+                        f"（另有 {others} 笔其他供应商账单未计入本行核对）"
+
+        # 附件：只从 GoFreight 取（用户口径）——shipment 文档页（业务传发票处）
+        # 优先，备忘录兜底。同 TK 多行（多供应商共票）复用缓存，不重复访问页面；
+        # 文件中心混着包装清单/船舶证书，只取发票样文件名（唯一 PDF 时兜底取）
+        pdfs: List[Tuple[bytes, str]] = []
+        att_src = ""
+        if row.tk in doc_cache:
+            pdfs = list(doc_cache[row.tk])
+            if pdfs:
+                att_src = "GoFreight文件中心"
+        else:
+            try:
+                all_pdfs = _fetch_pdfs_from_document_page(page, bctx, gfc, row.tk)
+            except Exception as e:  # noqa: BLE001 — 文档页异常不阻断，落备忘录
+                all_pdfs = []
+                r["note"] = (r["note"] + "；" if r["note"] else "") + \
+                    f"文件中心读取异常：{str(e)[:80]}"
+            inv = [p for p in all_pdfs if is_invoice_name(p[1])]
+            if inv:
+                pdfs = inv
+            elif len(all_pdfs) == 1:
+                pdfs = all_pdfs          # 唯一 PDF 无发票字样也兜底取
+            else:
+                pdfs = []
+                if all_pdfs:
+                    r["note"] = (r["note"] + "；" if r["note"] else "") + \
+                        f"文件中心有 {len(all_pdfs)} 个 PDF 但无发票样文件名（INV/发票）"
+            doc_cache[row.tk] = list(pdfs)
+            if pdfs:
+                att_src = "GoFreight文件中心"
+            elif acct_cache[row.tk]["memo_docs"] is None:
+                # 备忘录兜底只查一次/TK（v1.5.7）：异步加载、只在会计页读得到——
+                # 此刻页面可能停在文档页，回会计页再轮询；结果缓存给同 TK 后续行
+                back = f"{gfc.base_url}/truck/shipment/accounting/{row.tk}/"
+                login_fn(page, back)
+                memos = []
+                for _ in range(4):
+                    memos = page.evaluate(_JS_MEMO_RAW) or []
+                    if any(m.get("docs") for m in memos):
+                        break
+                    page.wait_for_timeout(1200)
+                acct_cache[row.tk]["memo_docs"] = \
+                    [d for m in (memos or []) for d in (m.get("docs") or [])]
+        memo_docs = acct_cache[row.tk].get("memo_docs") or []
+        if not pdfs and memo_docs:
+            get = lambda u: bctx.request.get(u, timeout=8000)  # noqa: E731
+            for d in memo_docs:
+                body, _u = download_doc(get, gfc.base_url, d)
+                pdfs.append((body, str(d.get("filename") or "invoice.pdf")))
+            att_src = att_src or "GoFreight备忘录"
+        if not pdfs:
+            if r["status"] == "OK":
+                r["status"] = "NO_PDF"
+            r["note"] = (r["note"] + "；" if r["note"] else "") + \
+                "无发票附件（GoFreight文件中心与备忘录均无）"
+        else:
+            if archive_lock is not None:   # 多页签：归档去重跨 worker 互斥
+                with archive_lock:
+                    for body, _orig in pdfs:
+                        r["files"].append(archive_pdf(body, row.vendor, day, out, used, seen))
+            else:
+                for body, _orig in pdfs:
+                    r["files"].append(archive_pdf(body, row.vendor, day, out, used, seen))
+            r["pdf_amount"], r["pdf_why"] = pdf_amount_for_row(
+                pdfs, row.vendor, pdf_text_cache)
+            r["note"] = (r["note"] + "；" if r["note"] else "") + \
+                f"附件×{len(pdfs)}（{att_src}）"
+        _shot(page, gfc, f"{prefix}_done")
+    except GoFreightStepError as e:
+        r["status"] = "FAIL"
+        r["note"] = f"{e.step}: {e.msg}"
+    except Exception as e:  # noqa: BLE001 — 单行意外不终止批次
+        r["status"] = "FAIL"
+        r["note"] = f"unexpected: {str(e)[:150]}"
+        _shot(page, gfc, f"{prefix}_FAIL_unexpected")
+    return r
+
+
 def run_cardispatch(rows: List[StmtRow], gfc, out_dir, day: Optional[date] = None,
                     on_result: Optional[Callable] = None,
-                    ctx: Optional[CardiCtx] = None) -> List[Dict]:
-    """一个浏览器会话逐 TK：读应付区核对金额 → 下载发票附件归档（**只从 GoFreight
-    取**：会计页「文件中心」优先 → 备忘录兜底）→ 归档 服务商_当天日期.pdf（重名 _02/_03）。
+                    ctx: Optional[CardiCtx] = None,
+                    workers: int = 1) -> List[Dict]:
+    """浏览器会话逐 TK：读应付区核对金额 → 下载发票附件归档（**只从 GoFreight 取**：
+    会计页「文件中心」优先 → 备忘录兜底）→ 归档 服务商_当天日期.pdf（重名 _02/_03）。
+
+    workers>=2 = 同会话多页签并发（v1.6.0，**默认 1=单页签，实测通过前别开**）：
+    主线程先「预热登录」落盘会话，再按 TK 分组轮转切片给各页签（同 TK 多行落同一
+    worker，缓存零跨线程共享）；重登加锁串行（防新登录挤掉彼此会话的自踢）、归档
+    去重加锁；多页签模式不做逐行会话落盘（登录落盘足够，避免并发互相覆盖）。
 
     状态：OK / MISMATCH（金额不符，标红）/ NO_BILL（无应付行）/ NO_PDF（无附件）/
     READ_FAIL（账单行定位失败）/ FAIL（异常）。单行失败不终止批次。"""
     from playwright.sync_api import sync_playwright
-    from .submit import _ensure_logged_in, _shot
+    from .submit import _ensure_logged_in
 
+    if not rows:
+        return []
     day = day or date.today()
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    used, seen = preload_seen(out)     # 重跑幂等：已归档文件不重复写
-    doc_cache: Dict[str, List[Tuple[bytes, str]]] = {}   # 同 TK 多行复用已下载附件
-    acct_cache: Dict[str, Dict] = {}   # tk→{"picked","memo_docs"}：同 TK 多行不重复访问会计页
-    pdf_text_cache: Dict = {}          # PDF 文本解析缓存（同发票跨行共享）
-
+    used, seen = preload_seen(out)     # 重跑幂等：已归档文件不重复写（多页签共享+锁）
     results: List[Dict] = []
+
+    if workers <= 1:
+        doc_cache: Dict[str, List[Tuple[bytes, str]]] = {}   # 同 TK 多行复用已下载附件
+        acct_cache: Dict[str, Dict] = {}   # tk→{"picked","memo_docs"}：同 TK 多行不重复访问会计页
+        pdf_text_cache: Dict = {}          # PDF 文本解析缓存（同发票跨行共享）
+        with sync_playwright() as pw:
+            browser, bctx, page = _new_page(pw, gfc)
+            for i, row in enumerate(rows, 1):
+                prefix = f"{i:02d}_cd_{row.tk.replace('-', '')}"
+                r = _process_row(page, bctx, gfc, row, prefix, day, out, used, seen,
+                                 acct_cache, doc_cache, pdf_text_cache,
+                                 lambda p, u: _ensure_logged_in(p, gfc, u))
+                print(f"  [{i}/{len(rows)}] {row.tk} {row.vendor[:20]} → {r['status']} {r['note'][:80]}")
+                results.append(r)
+                try:
+                    bctx.storage_state(path=gfc.browser_state)
+                except Exception:
+                    pass
+                if on_result:
+                    on_result(r)
+            browser.close()
+        return results
+
+    # ---- 多页签并发（workers>=2）----
+    import threading
+
+    # 预热登录：主线程先登录一次并落盘，各 worker 从同一份会话文件起跑
     with sync_playwright() as pw:
         browser, bctx, page = _new_page(pw, gfc)
-        for i, row in enumerate(rows, 1):
-            prefix = f"{i:02d}_cd_{row.tk.replace('-', '')}"
-            r: Dict = {"tk": row.tk, "row_no": row.row_no, "vendor": row.vendor,
-                       "stmt_amount": row.amount, "currency": row.currency,
-                       "status": "", "note": "", "invoices": "", "gf_amount": None,
-                       "files": []}
-            try:
-                cached = acct_cache.get(row.tk)
-                if cached is not None:
-                    picked = cached["picked"]   # 同 TK 多行（多供应商共票）整段复用，不再访问页面
-                else:
-                    acct = f"{gfc.base_url}/truck/shipment/accounting/{row.tk}/"
-                    _ensure_logged_in(page, gfc, acct)
-                    picked = None
-                    deadline = time.time() + 8  # 表格异步渲染：就绪即走（v1.5.7，原固定 6s+3×2.5s）
-                    while picked is None and time.time() < deadline:
-                        picked = pick_bills_table(page.evaluate(_JS_SCAN))
-                        if picked is None:
-                            page.wait_for_timeout(700)
-                    acct_cache[row.tk] = {"picked": picked, "memo_docs": None}
-                bills = (picked or {}).get("bills") or []
-                if picked is None:
-                    r["status"] = "READ_FAIL"
-                    r["note"] = "账单行未定位（无「成本(应付)」行，跑 --probe 看结构）"
-                elif not bills:
-                    r["status"] = "NO_BILL"
-                    r["note"] = "账单表无应付行（未建立应付？转人工核对）"
-                else:
-                    # 多供应商共 TK（2026-11-19 实跑实证：单柜 8 家各一笔）：
-                    # 只合计本行供应商的账单核对，其余供应商的账不掺进来
-                    mine = [b for b in bills if vendor_match(b.get("vendor"), row.vendor)]
-                    others = len(bills) - len(mine)
-                    if not mine:
-                        r["status"] = "NO_BILL"
-                        r["note"] = (f"该 TK 有 {len(bills)} 笔账单但无本供应商"
-                                     f"（{row.vendor}）的——转人工核对")
-                    else:
-                        total = round(sum(b["amount"] or 0 for b in mine), 2)
-                        r["invoices"] = ";".join(b["invoice_no"] for b in mine)
-                        r["gf_amount"] = total
-                        verdict = check_amount(total, row.amount)
-                        r["status"] = verdict if verdict in ("OK", "MISMATCH") else "NO_AMOUNT"
-                        if verdict == "MISMATCH":
-                            r["note"] = f"金额不符：{row.vendor} 在 GoFreight {total:.2f} vs 明细 {row.amount:.2f} {row.currency}"
-                        # 交叉校验（单笔时）：GoFreight 发票号 vs Excel D/C 号（模糊匹配：
-                        # 短号/去INV前缀互含算匹配），不一致只标注不判死
-                        if len(mine) == 1 and row.dc_no and \
-                                not invoice_no_match(mine[0]["invoice_no"], row.dc_no):
-                            r["note"] = (r["note"] + "；" if r["note"] else "") + \
-                                f"发票号不一致：GoFreight {mine[0]['invoice_no']} vs 明细D/C {row.dc_no}"
-                        if others:
-                            r["note"] = (r["note"] + "；" if r["note"] else "") + \
-                                f"（另有 {others} 笔其他供应商账单未计入本行核对）"
-
-                # 附件：只从 GoFreight 取（用户口径）——shipment 文档页（业务传发票处）
-                # 优先，备忘录兜底。同 TK 多行（多供应商共票）复用缓存，不重复访问页面；
-                # 文件中心混着包装清单/船舶证书，只取发票样文件名（唯一 PDF 时兜底取）
-                pdfs: List[Tuple[bytes, str]] = []
-                att_src = ""
-                if row.tk in doc_cache:
-                    pdfs = list(doc_cache[row.tk])
-                    if pdfs:
-                        att_src = "GoFreight文件中心"
-                else:
-                    try:
-                        all_pdfs = _fetch_pdfs_from_document_page(page, bctx, gfc, row.tk)
-                    except Exception as e:  # noqa: BLE001 — 文档页异常不阻断，落备忘录
-                        all_pdfs = []
-                        r["note"] = (r["note"] + "；" if r["note"] else "") + \
-                            f"文件中心读取异常：{str(e)[:80]}"
-                    inv = [p for p in all_pdfs if is_invoice_name(p[1])]
-                    if inv:
-                        pdfs = inv
-                    elif len(all_pdfs) == 1:
-                        pdfs = all_pdfs          # 唯一 PDF 无发票字样也兜底取
-                    else:
-                        pdfs = []
-                        if all_pdfs:
-                            r["note"] = (r["note"] + "；" if r["note"] else "") + \
-                                f"文件中心有 {len(all_pdfs)} 个 PDF 但无发票样文件名（INV/发票）"
-                    doc_cache[row.tk] = list(pdfs)
-                    if pdfs:
-                        att_src = "GoFreight文件中心"
-                    elif acct_cache[row.tk]["memo_docs"] is None:
-                        # 备忘录兜底只查一次/TK（v1.5.7）：异步加载、只在会计页读得到——
-                        # 此刻页面可能停在文档页，回会计页再轮询；结果缓存给同 TK 后续行
-                        back = f"{gfc.base_url}/truck/shipment/accounting/{row.tk}/"
-                        _ensure_logged_in(page, gfc, back)
-                        memos = []
-                        for _ in range(4):
-                            memos = page.evaluate(_JS_MEMO_RAW) or []
-                            if any(m.get("docs") for m in memos):
-                                break
-                            page.wait_for_timeout(1200)
-                        acct_cache[row.tk]["memo_docs"] = \
-                            [d for m in (memos or []) for d in (m.get("docs") or [])]
-                memo_docs = acct_cache[row.tk].get("memo_docs") or []
-                if not pdfs and memo_docs:
-                    get = lambda u: bctx.request.get(u, timeout=8000)  # noqa: E731
-                    for d in memo_docs:
-                        body, _u = download_doc(get, gfc.base_url, d)
-                        pdfs.append((body, str(d.get("filename") or "invoice.pdf")))
-                    att_src = att_src or "GoFreight备忘录"
-                if not pdfs:
-                    if r["status"] == "OK":
-                        r["status"] = "NO_PDF"
-                    r["note"] = (r["note"] + "；" if r["note"] else "") + \
-                        "无发票附件（GoFreight文件中心与备忘录均无）"
-                else:
-                    for body, _orig in pdfs:
-                        r["files"].append(archive_pdf(body, row.vendor, day, out, used, seen))
-                    r["pdf_amount"], r["pdf_why"] = pdf_amount_for_row(
-                        pdfs, row.vendor, pdf_text_cache)
-                    r["note"] = (r["note"] + "；" if r["note"] else "") + \
-                        f"附件×{len(pdfs)}（{att_src}）"
-                _shot(page, gfc, f"{prefix}_done")
-            except GoFreightStepError as e:
-                r["status"] = "FAIL"
-                r["note"] = f"{e.step}: {e.msg}"
-            except Exception as e:  # noqa: BLE001 — 单行意外不终止批次
-                r["status"] = "FAIL"
-                r["note"] = f"unexpected: {str(e)[:150]}"
-                _shot(page, gfc, f"{prefix}_FAIL_unexpected")
-            ok = r["status"] in ("OK", "MISMATCH", "NO_PDF")
-            print(f"  [{i}/{len(rows)}] {row.tk} {row.vendor[:20]} → {r['status']} {r['note'][:80]}")
-            results.append(r)
-            try:
-                bctx.storage_state(path=gfc.browser_state)
-            except Exception:
-                pass
-            if on_result:
-                on_result(r)
+        _ensure_logged_in(page, gfc,
+                          f"{gfc.base_url}/truck/shipment/accounting/{rows[0].tk}/")
+        try:
+            bctx.storage_state(path=gfc.browser_state)
+        except Exception:
+            pass
         browser.close()
+
+    buckets = partition_rows_by_tk(rows, workers)
+    state_path = Path(gfc.browser_state)
+    login_lock, state_lock = threading.Lock(), threading.Lock()
+    res_lock, arch_lock = threading.Lock(), threading.Lock()
+    threads: List[threading.Thread] = []
+    errs: List[Tuple[int, str]] = []
+
+    def worker(wid: int, bucket: List[StmtRow]) -> None:
+        try:
+            with sync_playwright() as pw:
+                browser, bctx, page = _new_page(pw, gfc)
+
+                def login_fn(p, u, _b=bctx, _w=wid):
+                    _ensure_logged_in_mt(p, _b, gfc, u, state_path, _w,
+                                         login_lock, state_lock)
+
+                acct_cache_w: Dict = {}   # TK 切片保证同 TK 全在本 worker——缓存私有即可
+                doc_cache_w: Dict = {}
+                pdf_text_w: Dict = {}
+                for j, row in enumerate(bucket, 1):
+                    prefix = f"{row.row_no:03d}_w{wid}_cd_{row.tk.replace('-', '')}"
+                    r = _process_row(page, bctx, gfc, row, prefix, day, out,
+                                     used, seen,
+                                     acct_cache_w, doc_cache_w, pdf_text_w,
+                                     login_fn, wid, arch_lock)
+                    with res_lock:
+                        print(f"  [w{wid} {j}/{len(bucket)}] {row.tk} {row.vendor[:20]} "
+                              f"→ {r['status']} {r['note'][:80]}")
+                        results.append(r)
+                        if on_result:
+                            on_result(r)
+                browser.close()
+        except Exception as e:  # noqa: BLE001 — 单页签崩掉不拖垮其余
+            errs.append((wid, str(e)[:200]))
+
+    for wid, bucket in enumerate(buckets):
+        t = threading.Thread(target=worker, args=(wid, bucket), daemon=True)
+        t.start()
+        threads.append(t)
+        time.sleep(1.5)            # 错峰启动，降低撞车/限流风险
+    for t in threads:
+        t.join()
+    results.sort(key=lambda r: r["row_no"])
+    if errs:
+        print(f"  ⚠ {len(errs)} 个页签中途退出：{errs[:3]}")
     return results
 
 
