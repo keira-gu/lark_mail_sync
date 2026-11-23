@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import time
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -422,10 +423,15 @@ def _fetch_pdfs_from_document_page(page, bctx, gfc, tk: str) -> List[Tuple[bytes
     """shipment 文档页 → [(pdf bytes, 名称)]。只取 .pdf（发票）；单个失败试下一个。"""
     page.goto(f"{gfc.base_url}/truck/shipment/document/{tk}",
               wait_until="domcontentloaded", timeout=45000)
-    page.wait_for_timeout(5000)
+    rows = []
+    deadline = time.time() + 6     # 表格异步渲染：就绪即走（v1.5.7，原固定 5s）
+    while not rows and time.time() < deadline:
+        rows = page.evaluate(_JS_DOC_ROWS) or []
+        if not rows:
+            page.wait_for_timeout(700)
     get = lambda u: bctx.request.get(u, timeout=8000)  # noqa: E731
     out: List[Tuple[bytes, str]] = []
-    for d in page.evaluate(_JS_DOC_ROWS) or []:
+    for d in rows:
         if not str(d.get("name") or "").lower().endswith(".pdf"):
             continue
         try:
@@ -505,6 +511,7 @@ def run_cardispatch(rows: List[StmtRow], gfc, out_dir, day: Optional[date] = Non
     out.mkdir(parents=True, exist_ok=True)
     used, seen = preload_seen(out)     # 重跑幂等：已归档文件不重复写
     doc_cache: Dict[str, List[Tuple[bytes, str]]] = {}   # 同 TK 多行复用已下载附件
+    acct_cache: Dict[str, Dict] = {}   # tk→{"picked","memo_docs"}：同 TK 多行不重复访问会计页
     pdf_text_cache: Dict = {}          # PDF 文本解析缓存（同发票跨行共享）
 
     results: List[Dict] = []
@@ -517,16 +524,19 @@ def run_cardispatch(rows: List[StmtRow], gfc, out_dir, day: Optional[date] = Non
                        "status": "", "note": "", "invoices": "", "gf_amount": None,
                        "files": []}
             try:
-                acct = f"{gfc.base_url}/truck/shipment/accounting/{row.tk}/"
-                _ensure_logged_in(page, gfc, acct)
-                page.wait_for_timeout(6000)
-
-                picked = None
-                for _ in range(3):   # 表格异步渲染（试点实踩）：READ_FAIL 前重试扫描
-                    picked = pick_bills_table(page.evaluate(_JS_SCAN))
-                    if picked is not None:
-                        break
-                    page.wait_for_timeout(2500)
+                cached = acct_cache.get(row.tk)
+                if cached is not None:
+                    picked = cached["picked"]   # 同 TK 多行（多供应商共票）整段复用，不再访问页面
+                else:
+                    acct = f"{gfc.base_url}/truck/shipment/accounting/{row.tk}/"
+                    _ensure_logged_in(page, gfc, acct)
+                    picked = None
+                    deadline = time.time() + 8  # 表格异步渲染：就绪即走（v1.5.7，原固定 6s+3×2.5s）
+                    while picked is None and time.time() < deadline:
+                        picked = pick_bills_table(page.evaluate(_JS_SCAN))
+                        if picked is None:
+                            page.wait_for_timeout(700)
+                    acct_cache[row.tk] = {"picked": picked, "memo_docs": None}
                 bills = (picked or {}).get("bills") or []
                 if picked is None:
                     r["status"] = "READ_FAIL"
@@ -561,14 +571,6 @@ def run_cardispatch(rows: List[StmtRow], gfc, out_dir, day: Optional[date] = Non
                             r["note"] = (r["note"] + "；" if r["note"] else "") + \
                                 f"（另有 {others} 笔其他供应商账单未计入本行核对）"
 
-                memos = None
-                for _ in range(4):   # 备忘录异步加载轮询（同 probe）
-                    memos = page.evaluate(_JS_MEMO_RAW)
-                    if memos is not None and any(m.get("docs") for m in memos):
-                        break
-                    page.wait_for_timeout(1200)
-                memo_docs = [d for m in (memos or []) for d in (m.get("docs") or [])]
-
                 # 附件：只从 GoFreight 取（用户口径）——shipment 文档页（业务传发票处）
                 # 优先，备忘录兜底。同 TK 多行（多供应商共票）复用缓存，不重复访问页面；
                 # 文件中心混着包装清单/船舶证书，只取发票样文件名（唯一 PDF 时兜底取）
@@ -598,6 +600,20 @@ def run_cardispatch(rows: List[StmtRow], gfc, out_dir, day: Optional[date] = Non
                     doc_cache[row.tk] = list(pdfs)
                     if pdfs:
                         att_src = "GoFreight文件中心"
+                    elif acct_cache[row.tk]["memo_docs"] is None:
+                        # 备忘录兜底只查一次/TK（v1.5.7）：异步加载、只在会计页读得到——
+                        # 此刻页面可能停在文档页，回会计页再轮询；结果缓存给同 TK 后续行
+                        back = f"{gfc.base_url}/truck/shipment/accounting/{row.tk}/"
+                        _ensure_logged_in(page, gfc, back)
+                        memos = []
+                        for _ in range(4):
+                            memos = page.evaluate(_JS_MEMO_RAW) or []
+                            if any(m.get("docs") for m in memos):
+                                break
+                            page.wait_for_timeout(1200)
+                        acct_cache[row.tk]["memo_docs"] = \
+                            [d for m in (memos or []) for d in (m.get("docs") or [])]
+                memo_docs = acct_cache[row.tk].get("memo_docs") or []
                 if not pdfs and memo_docs:
                     get = lambda u: bctx.request.get(u, timeout=8000)  # noqa: E731
                     for d in memo_docs:

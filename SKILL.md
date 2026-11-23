@@ -196,6 +196,10 @@ python_venv/Scripts/python -m gofreight_ap --env-file .env cardispatch 美国服
   `runtime-outputs/cardispatch/卡派对账清单_时间戳.xlsx`（问题行标红）；
   ③原 Excel 三列标注。口径细节（列匹配 / 金额核对 / PDF 金额识别 / md5 去重）全在
   `references/卡派对账指引.md`。
+- **cardispatch 速度口径（v1.5.7 起）**：每 TK **就绪即走**（页面一渲染出来就往下走，
+  不再固定等待），约 6~10 秒/TK；200 行级别整份约 **20~40 分钟**（网络慢会更久）。
+  让 WorkBuddy **一次 `--yes` 全量跑完，不要 `--limit` 分批、不要逐行停顿解读**，
+  全部跑完再汇报；跑批中途的逐行 `[i/N] …` 输出是正常进度，不是卡死。
 
 ## 七、故障手册
 
