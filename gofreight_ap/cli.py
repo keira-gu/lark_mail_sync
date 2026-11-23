@@ -176,6 +176,61 @@ def cmd_memo(args) -> int:
     return 1 if fails else 0
 
 
+def cmd_cardispatch(args) -> int:
+    """卡派发票对账归档：Excel → 逐 TK 读 GoFreight 应付核对金额 → 下载发票附件归档。
+    只读核对 + 下载，绝不写 GoFreight 数据。"""
+    from .cardispatch import (annotate_excel, probe_tk, read_statement,
+                              run_cardispatch, write_report)
+    rows, bad = read_statement(args.excel)
+    for no, why in bad:
+        print(f"  ⚠ 第 {no} 行跳过：{why}")
+    if args.tk:
+        tks = set(args.tk)
+        rows = [r for r in rows if r.tk in tks]
+    if args.limit:
+        rows = rows[: args.limit]
+    print(f"卡派对账计划：{len(rows)} 个 TK，附件归档目录 {args.out}")
+
+    raw = load_env_file(args.env_file)
+    base, user, pwd = (_gf(raw, "GOFREIGHT_BASE_URL"), _gf(raw, "GOFREIGHT_USER"),
+                       _gf(raw, "GOFREIGHT_PASSWORD"))
+    missing = [k for k, v in [("GOFREIGHT_BASE_URL", base), ("GOFREIGHT_USER", user),
+                              ("GOFREIGHT_PASSWORD", pwd)] if not v]
+    if missing:
+        raise ConfigError(f".env 缺 {missing}（卡派对账需要）")
+    gfc = GfConfig(base_url=base.rstrip("/"), user=user, password=pwd)
+
+    if args.probe:
+        if not args.tk:
+            print("--probe 需要 --tk 指定单个 TK（dump 应付区表头/行 + 备忘录附件原始字段）")
+            return 2
+        probe_tk(args.tk[0], gfc)
+        return 0
+
+    for i, r in enumerate(rows, 1):
+        print(f"  {i:3d}) {r.tk} | {r.vendor[:30]} | {r.amount:.2f} {r.currency} | D/C {r.dc_no}")
+    if not rows:
+        return 0
+    if not args.yes:
+        print("\n以上为计划，未执行。确认后加 --yes（只读核对+下载附件，不动 GoFreight 数据）。")
+        return 0
+
+    # 附件只从 GoFreight 取（用户口径）：会计页「文件中心」优先 → 备忘录兜底
+    results = run_cardispatch(rows, gfc, args.out)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report = write_report(results, rows, Path(f"runtime-outputs/cardispatch/卡派对账清单_{ts}.xlsx"))
+    n = lambda s: sum(1 for r in results if r["status"] == s)  # noqa: E731
+    print(f"\n完成：OK {n('OK')} / 金额不符 {n('MISMATCH')} / 无应付 {n('NO_BILL')} / "
+          f"无附件 {n('NO_PDF')} / 读取失败 {n('READ_FAIL')} / 异常 {n('FAIL')}")
+    print(f"对账清单：{report}")
+    try:
+        src, bak = annotate_excel(args.excel, results, rows)
+        print(f"原 Excel 已标注：{src}（备份 {bak.name}）")
+    except Exception as e:  # noqa: BLE001 — 标注失败不吞对账结果
+        print(f"⚠ 原 Excel 标注失败：{str(e)[:120]}（结果看对账清单）")
+    return 1 if (n("READ_FAIL") + n("FAIL")) else 0
+
+
 def cmd_mark(args) -> int:
     if not args.invoice or not args.tk:
         print("mark 需要 --invoice 和 --tk")
@@ -213,10 +268,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     sp.add_argument("--yes", action="store_true", help="确认执行（缺省只出计划）")
     _add_filters(sp)
 
+    sp = sub.add_parser("cardispatch", help="卡派发票对账归档（Excel→核对GoFreight应付→附件归档）")
+    sp.add_argument("excel", help="服务商明细 Excel 路径（格式同 美国服务商明细.xlsx）")
+    sp.add_argument("--yes", action="store_true", help="确认执行（缺省只出计划）")
+    sp.add_argument("--out", default="D:/卡派发票", help="附件归档目录（默认 D:/卡派发票）")
+    sp.add_argument("--probe", action="store_true",
+                    help="单 TK dump 应付区/附件原始字段（控件定稿用，需配 --tk）")
+    _add_filters(sp)
+
     args = p.parse_args(argv)
     try:
         return {"plan": cmd_plan, "submit": cmd_submit, "mark": cmd_mark,
-                "memo": cmd_memo}.get(args.cmd, cmd_plan)(args)
+                "memo": cmd_memo, "cardispatch": cmd_cardispatch}.get(args.cmd, cmd_plan)(args)
     except (ConfigError, ValueError) as e:
         print(f"配置错误：{e}")
         return 2

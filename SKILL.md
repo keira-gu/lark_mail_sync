@@ -1,6 +1,6 @@
 ---
 name: lark-mail-sync
-description: This skill should be used when syncing Lark Mail settlement confirmation emails into the Lark Base (bitable) settlement table — matching emails whose subject or body contains "confirm" (case-insensitive), parsing container/TK/quantity lines, allocating invoice amounts by quantity, uploading invoice PDF attachments, and extracting vendor/currency/invoice-date fields from the PDF. Also covers archiving fully-processed settlement emails out of the inbox (move to the ARCHIVED folder, strictly limited to emails already recorded in the table), and creating GoFreight AP entries (建立应付) from bitable rows — plan the submission list first, require explicit user confirmation before submitting, dedup by invoice|TK, auto-screenshot failures. Also covers guiding the first-time enterprise custom-app (cli_ credentials) application and permission setup, filling .env from user-pasted credentials (parsing the bitable link for APP_TOKEN/TABLE_ID), connectivity probe, incremental sync, and state rebuild after reinstall or machine change. Strictly incremental and append-only: it must never run reset-table (wipes the whole table) or backfill (full re-import that duplicates rows when local state is empty). Triggers include 邮件同步, 同步邮件, 跑一轮同步, 结算邮件, confirm邮件, TK录入, 结算录入, 多维表同步, 邮件同步SKILL, 归档已处理邮件, 归档邮件, 建立应付, 录应付, 应付录入, GoFreight, gofreight, 建立应付清单, 申请应用, 自建应用, 申请权限, 填配置, lark mail sync.
+description: This skill should be used when syncing Lark Mail settlement confirmation emails into the Lark Base (bitable) settlement table — matching emails whose subject or body contains "confirm" (case-insensitive), parsing container/TK/quantity lines, allocating invoice amounts by quantity, uploading invoice PDF attachments, and extracting vendor/currency/invoice-date fields from the PDF. Also covers archiving fully-processed settlement emails out of the inbox (move to the ARCHIVED folder, strictly limited to emails already recorded in the table), and creating GoFreight AP entries (建立应付) from bitable rows — plan the submission list first, require explicit user confirmation before submitting, dedup by invoice|TK, auto-screenshot failures. Also covers truck-dispatch (卡派) invoice reconciliation and archiving (cardispatch): read the vendor statement Excel (服务商明细), verify per-TK GoFreight AP totals (multi-vendor shared TK filtered by this row's vendor), download invoice PDFs from GoFreight only (shipment document page first, accounting-page memo fallback), archive them as vendor_dated files with global md5 dedup, and annotate results back into the original Excel (发票金额/发票情况/对账问题 columns, auto-backup, no cell coloring) — strictly read-only against GoFreight and two-phase (plan first, --yes only after user confirmation). Also covers guiding the first-time enterprise custom-app (cli_ credentials) application and permission setup, filling .env from user-pasted credentials (parsing the bitable link for APP_TOKEN/TABLE_ID), connectivity probe, incremental sync, and state rebuild after reinstall or machine change. Strictly incremental and append-only: it must never run reset-table (wipes the whole table) or backfill (full re-import that duplicates rows when local state is empty). Triggers include 邮件同步, 同步邮件, 跑一轮同步, 结算邮件, confirm邮件, TK录入, 结算录入, 多维表同步, 邮件同步SKILL, 归档已处理邮件, 归档邮件, 建立应付, 录应付, 应付录入, GoFreight, gofreight, 建立应付清单, 卡派对账, 对账归档, 服务商明细, 服务商明细对账, 卡派发票, 发票归档, 申请应用, 自建应用, 申请权限, 填配置, lark mail sync.
 agent_created: true
 ---
 
@@ -28,6 +28,10 @@ agent_created: true
 9. **`data/gofreight_state.json` 是建立应付防重账本，绝不删除**。删了会重复建立应付。
 10. **submit 期间该 GoFreight 账号不能在别处登录**（单会话互踢）。开始提交前提醒用户
     关掉其他浏览器里登录的 GoFreight；提交中提示「重新登录」属正常（约 15 分钟过期自动重登）。
+11. **卡派对账（cardispatch）对 GoFreight 只读**：只核对金额、下载附件，绝不建立/修改/
+    删除 GoFreight 任何数据；同样两段式（先计划，用户确认后才 `--yes`）。对原 Excel 也只写
+    「发票金额 / 发票情况 / 对账问题」三列，且写前自动备份，其余列绝不碰；附件**只从
+    GoFreight 取**（会计页文件中心优先 → 备忘录兜底），不从多维表或邮箱另拉。
 
 ## 二、适用场景
 
@@ -38,6 +42,10 @@ agent_created: true
   仍可基于表内现状出清单，但要注明「本轮未同步、可能缺最新邮件」）→
   ②`gofreight_ap plan` 出清单 → ③**用户确认一句后**才 `submit --yes` → ④收尾汇报
   （口径与流程见 `references/建立应付指引.md`）
+- 业务说「卡派对账 / 对账归档 / 服务商明细对账 / 把卡派发票下下来」→
+  `gofreight_ap cardispatch <excel路径>` 先出核对计划（每个 TK 一行）→ **用户确认后**
+  加 `--yes` 执行：逐 TK 只读核对 GoFreight 应付金额、下载发票附件归档、结果标注回原
+  Excel（口径与输出解读见 `references/卡派对账指引.md`）
 - 业务说「还没应用 / 怎么申请应用 / 要权限」→ 按 `references/应用申请指引.md` 分步引导
   （建应用 → 添加机器人能力 → 开 6 个权限（见指引第 2 步权限表）→ 发布审批 →
   可用范围加自己 → 管理员加文档应用；全程不要替业务保管/回显 App Secret）
@@ -53,6 +61,7 @@ agent_created: true
 
 > 请用【邮件同步 SKILL】跑一轮同步。
 > 请用【邮件同步 SKILL】出一份建立应付清单。　（这一句=全链：先同步最新邮件→出清单→你确认后才真提交）
+> 请用【邮件同步 SKILL】对 美国服务商明细.xlsx 跑一轮卡派对账归档。
 > 请用【邮件同步 SKILL】帮我填好配置，再检查一遍是不是都能正常用。
 
 ## 三、环境要求
@@ -120,6 +129,7 @@ python_venv\Scripts\python -m gofreight_ap --env-file .env plan
 python_venv\Scripts\python -m gofreight_ap --env-file .env submit
 python_venv\Scripts\python -m gofreight_ap --env-file .env submit --yes
 python_venv\Scripts\python -m gofreight_ap --env-file .env mark --invoice 1001 --tk TK-20990011
+python_venv\Scripts\python -m gofreight_ap --env-file .env cardispatch 美国服务商明细.xlsx
 ```
 
 bash 形式（路径正斜杠）：
@@ -133,6 +143,7 @@ python_venv/Scripts/python -m lark_mail_sync --env-file .env archive
 python_venv/Scripts/python -m lark_mail_sync --env-file .env rebuild-state
 python_venv/Scripts/python -m gofreight_ap --env-file .env plan
 python_venv/Scripts/python -m gofreight_ap --env-file .env submit --yes
+python_venv/Scripts/python -m gofreight_ap --env-file .env cardispatch 美国服务商明细.xlsx
 ```
 
 | 命令 | 作用 | 何时用 |
@@ -148,6 +159,9 @@ python_venv/Scripts/python -m gofreight_ap --env-file .env submit --yes
 | `gofreight_ap submit --yes --dry` | 只填表单不点储存（联调） | 几乎不用 |
 | `gofreight_ap memo` | 给**已记账**的行补传发票备忘录（不带 `--yes` 只出计划；不动应付） | submit 时备忘录失败的行、补历史欠账时 |
 | `gofreight_ap mark --invoice N --tk TK-x` | 手工补记「已建立应付」进防重账本 | 管理员告知某笔已录过时 |
+| `gofreight_ap cardispatch <excel>` | 读《服务商明细》Excel → 逐 TK 读 GoFreight 应付**核对金额** → 下载发票附件归档（**只从 GoFreight 取**：会计页「文件中心」优先→备忘录兜底；不带 `--yes` 只出计划；**只读核对+下载，不写 GoFreight**） | 每轮卡派对账归档 |
+| `gofreight_ap cardispatch <excel> --yes [--out D:/卡派发票]` | 真执行：附件按 `服务商_当天日期.pdf` 归档（重名自动 _02/_03；**同一份发票 md5 全目录只存一份**），对账清单落 `runtime-outputs/cardispatch/`，**结果标注回原 Excel**（发票金额←PDF识别 / 发票情况 / 对账问题 三列，**不加底色**；先自动备份 .backup-时间戳，原文件被占用时自动落 `_对账标注` 副本） | 用户确认计划后 |
+| `gofreight_ap cardispatch <excel> --probe --tk TK-x` | 单 TK dump 应付区表头/行 + 备忘录附件原始字段 | **首次使用前**（控件定稿）/ 读取失败时 |
 | 命令前加全局 `--dry-run`（lark_mail_sync）/ 过滤参数 `--invoice`/`--tk`/`--limit`（gofreight_ap） | 只打印将做什么 / 缩小本轮范围 | 业务想先看一眼或分批录时 |
 
 全局旗标 `--dry-run` 放在**子命令前面**（`--env-file .env --dry-run sync`）；
@@ -172,6 +186,16 @@ python_venv/Scripts/python -m gofreight_ap --env-file .env submit --yes
   「标题=发票号」的条目并上传多维表「发票」附件列的 PDF（多 TK 摊分每 TK 各一份；
   目标文件已挂过的不重传）。**备忘录失败不影响应付记账**——汇总里会列「备忘录未传」
   清单，跑 `gofreight_ap memo --yes` 补传即可；多维表无附件列取值的行自动跳过备忘录。
+- `gofreight_ap cardispatch` 每行输出 `TK 服务商 → 状态 备注`，七态：
+  **OK**=金额核对通过；**MISMATCH**=GoFreight 合计与明细不符（对账清单标红，附件照下）；
+  **NO_BILL**=该 TK 无本供应商账单（含多供应商共 TK、账全是别家的情况）；
+  **NO_AMOUNT**=账单行读不到金额；**NO_PDF**=金额过了但 GoFreight 文件中心与备忘录
+  均无发票附件；**READ_FAIL / FAIL**=账单定位失败 / 意外异常（自动截图）。
+  单行失败不终止批次，结束汇总各态数量；有 READ_FAIL/FAIL 时命令返回非 0。
+- cardispatch 跑完三个产物：①附件归档目录（默认 `D:\卡派发票`）；②对账清单
+  `runtime-outputs/cardispatch/卡派对账清单_时间戳.xlsx`（问题行标红）；
+  ③原 Excel 三列标注。口径细节（列匹配 / 金额核对 / PDF 金额识别 / md5 去重）全在
+  `references/卡派对账指引.md`。
 
 ## 七、故障手册
 
@@ -195,6 +219,13 @@ python_venv/Scripts/python -m gofreight_ap --env-file .env submit --yes
 | 提交中提示「会话过期，重新登录」 | 正常（会话约 15 分钟过期，自动重登） | 无需处理；若重登也失败按 FAIL_login 排查 |
 | 汇总出现「备忘录未传 N 行」 | 备忘录环节失败（**应付本身已成立，记账不受影响**） | 跑 `gofreight_ap memo --yes` 补传（已传过的不重传）；仍失败的行看 `runtime-outputs/gofreight/` 截图转人工，别反复重试 |
 | 想看「这轮会录什么」 | — | `sync` 用 `--dry-run`；建立应付直接 `plan`（本来就只读） |
+| cardispatch 报 READ_FAIL「账单行未定位」 | 会计页表格异步渲染慢，或 GoFreight 改版 | 用 `--tk` 缩小范围重跑该 TK；仍失败跑 `cardispatch <excel> --probe --tk TK-x` dump 页面结构，按 `references/卡派对账指引.md` 的识别口径排查 |
+| cardispatch 结果 NO_BILL 但业务说录过 | ①多供应商共 TK，账挂在别家名下；②账挂在 MBL 层（TK 会计页看不到，同建立应付防重弹窗场景） | 看备注「另有 N 笔其他供应商账单」；确认确实录过 → 该行转人工核对，**绝不反向改明细迁就 GoFreight** |
+| cardispatch 结果 MISMATCH | GoFreight 合计与明细不一致（漏录 / 多录 / 摊分差 / 贷项冲减） | 对账清单里「应付金额(明细)」vs「金额(GoFreight)」直接比，转人工核对；绝不改 GoFreight，也别急着改 Excel——先让人确认哪边对 |
+| cardispatch 结果 NO_PDF / 发票情况=未找到发票附件 | GoFreight 文件中心与备忘录都没传发票；或文件中心多个 PDF 都不是发票样文件名 | 看「对账问题」列原因；确实没传 → 转告业务在 GoFreight 补传后重跑（归档 md5 去重，已下载的不会重复） |
+| 发票情况=发票金额未识别(扫描件) | PDF 无文本层（扫描件 / 加密件），抽不出文字 | 人工看归档的 PDF 把「发票金额」列补上；重跑不会解决 |
+| 重跑 cardispatch 会重复下载 / 写花 Excel 吗 | 不会 | 附件 md5 全局去重 + 重名 _02/_03 预热；对账清单按时间戳另落新文件；原 Excel 每轮先备份再覆盖标注三列 |
+| 卡派对账想先只核某几个 TK | — | `cardispatch <excel> --yes --tk TK-x --tk TK-y`（`--limit` 截前 N 行；**`--invoice` 对 cardispatch 无效**，明细侧没有发票号过滤） |
 
 ## 八、数据口径
 
@@ -203,6 +234,8 @@ python_venv/Scripts/python -m gofreight_ap --env-file .env submit --yes
 口径本身不要凭感觉改，业务要改口径时让用户找管理员（口径改动需重发新版包）。
 建立应付的口径（发布日期/费用代码/数量单价/币种/防重/供应商映射）——全部在
 **`references/建立应付指引.md`**。
+卡派对账归档的口径（Excel 列匹配 / 金额核对 / 附件来源 / 归档命名与去重 / PDF 金额
+识别 / 结果标注）——全部在 **`references/卡派对账指引.md`**。
 应用申请/凭证/权限问题——全部在 **`references/应用申请指引.md`**（含常见卡点速查）。
 
 ## 九、目录结构（仓库根目录 = skill 本体 = 工作目录）
@@ -213,6 +246,7 @@ python_venv/Scripts/python -m gofreight_ap --env-file .env submit --yes
 ├── references\应用申请指引.md   ← 业务自己申请企业自建应用（cli_ 凭证）的分步指引
 ├── references\录入口径.md      ← 数据口径与防重规则
 ├── references\建立应付指引.md   ← 建立应付口径、确认流程、防重与故障处理
+├── references\卡派对账指引.md   ← 卡派对账核对口径、归档规则、结果标注解读
 ├── lark_mail_sync\            ← Python 源码（邮件→多维表）
 ├── gofreight_ap\              ← Python 源码（多维表→GoFreight 建立应付）
 ├── tests\ tests_internal\     ← 离线自测（无需网络）
