@@ -162,7 +162,7 @@ python_venv/Scripts/python -m gofreight_ap --env-file .env cardispatch 美国服
 | `gofreight_ap memo` | 给**已记账**的行补传发票备忘录（不带 `--yes` 只出计划；不动应付） | submit 时备忘录失败的行、补历史欠账时 |
 | `gofreight_ap mark --invoice N --tk TK-x` | 手工补记「已建立应付」进防重账本 | 管理员告知某笔已录过时 |
 | `gofreight_ap cardispatch [excel]` | 读《服务商明细》Excel → 逐 TK 读 GoFreight 应付**核对金额** → 下载发票附件归档（**只从 GoFreight 取**：会计页「文件中心」优先→备忘录兜底；不带 `--yes` 只出计划；**只读核对+下载，不写 GoFreight**）。**Excel 参数可省略**（v1.5.9）：自动发现最新的《服务商明细》表（当前目录/桌面/下载/文档，排除备份/对账结果变体取最近修改）；给了参数则按文件名自动定位或完整路径直用 | 每轮卡派对账归档 |
-| `gofreight_ap cardispatch <excel> --yes [--out D:/卡派发票] [--workers N]` | 真执行：附件按 `服务商_当天日期.pdf` 归档（重名自动 _02/_03；**同一份发票 md5 全目录只存一份**），对账清单落 `runtime-outputs/cardispatch/`，**结果标注回原 Excel**（发票金额←PDF识别 / 发票情况 / 对账问题 三列，**不加底色**；先自动备份 .backup-时间戳，原文件被占用时自动落 `_对账标注` 副本）。`--workers 2~3` = 同会话多页签并发（v1.6.0，**默认 1**；预期再快 2~3 倍；先 `--limit 20 --workers 3` 小批实测通过后再整份用，跑批期间账号仍别在别处登录） | 用户确认计划后 |
+| `gofreight_ap cardispatch <excel> --yes [--out D:/卡派发票] [--workers N]` | 真执行：附件按 `服务商_当天日期.pdf` 归档（重名自动 _02/_03；**同一份发票 md5 全目录只存一份**），对账清单落**归档目录**（`D:/卡派发票/卡派对账清单_时间戳.xlsx`，和 PDF 一起），**结果标注回原 Excel**（发票金额←PDF识别 / 发票情况 / 对账问题 三列，**不加底色**；先自动备份 .backup-时间戳，原文件被占用时自动落 `_对账标注` 副本）。`--workers 2~3` = 同会话多页签并发（v1.6.0，**默认 1**；预期再快 2~3 倍；先 `--limit 20 --workers 3` 小批实测通过后再整份用，跑批期间账号仍别在别处登录） | 用户确认计划后 |
 | `gofreight_ap cardispatch <excel> --probe --tk TK-x` | 单 TK dump 应付区表头/行 + 备忘录附件原始字段 | **首次使用前**（控件定稿）/ 读取失败时 |
 | 命令前加全局 `--dry-run`（lark_mail_sync）/ 过滤参数 `--invoice`/`--tk`/`--limit`（gofreight_ap） | 只打印将做什么 / 缩小本轮范围 | 业务想先看一眼或分批录时 |
 
@@ -194,8 +194,8 @@ python_venv/Scripts/python -m gofreight_ap --env-file .env cardispatch 美国服
   **NO_AMOUNT**=账单行读不到金额；**NO_PDF**=金额过了但 GoFreight 文件中心与备忘录
   均无发票附件；**READ_FAIL / FAIL**=账单定位失败 / 意外异常（自动截图）。
   单行失败不终止批次，结束汇总各态数量；有 READ_FAIL/FAIL 时命令返回非 0。
-- cardispatch 跑完三个产物：①附件归档目录（默认 `D:\卡派发票`）；②对账清单
-  `runtime-outputs/cardispatch/卡派对账清单_时间戳.xlsx`（问题行标红）；
+- cardispatch 跑完三个产物：①附件归档目录（默认 `D:\卡派发票`，内含 PDF + 对账清单）；②对账清单
+  `卡派对账清单_时间戳.xlsx`（在归档目录里，问题行标红）；
   ③原 Excel 三列标注。口径细节（列匹配 / 金额核对 / PDF 金额识别 / md5 去重）全在
   `references/卡派对账指引.md`。
 - **cardispatch 速度口径（v1.5.7 起）**：每 TK **就绪即走**（页面一渲染出来就往下走，

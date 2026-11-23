@@ -226,7 +226,8 @@ def cmd_cardispatch(args) -> int:
     # 附件只从 GoFreight 取（用户口径）：会计页「文件中心」优先 → 备忘录兜底
     results = run_cardispatch(rows, gfc, args.out, workers=max(1, args.workers))
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    report = write_report(results, rows, Path(f"runtime-outputs/cardispatch/卡派对账清单_{ts}.xlsx"))
+    # 对账清单与 PDF 同目录归档（v1.6.1，用户口径：清单跟着发票走，不再埋 runtime-outputs）
+    report = write_report(results, rows, Path(args.out) / f"卡派对账清单_{ts}.xlsx")
     n = lambda s: sum(1 for r in results if r["status"] == s)  # noqa: E731
     print(f"\n完成：OK {n('OK')} / 金额不符 {n('MISMATCH')} / 无应付 {n('NO_BILL')} / "
           f"无附件 {n('NO_PDF')} / 读取失败 {n('READ_FAIL')} / 异常 {n('FAIL')}")
