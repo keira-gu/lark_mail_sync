@@ -231,6 +231,35 @@ def test_stmt_row_smoke():
     assert r.tk == "TK-1"
 
 
+def test_resolve_statement_path(tmp_path, monkeypatch):
+    """v1.5.8：只给文件名 → 当前目录外的常见位置自动定位；精确名优先于模糊包含。"""
+    from gofreight_ap.cardispatch import resolve_statement_path
+    monkeypatch.chdir(tmp_path)   # 隔离 CWD：项目根躺着的真实明细表不得干扰断言
+    dl = tmp_path / "Downloads"
+    dl.mkdir()
+    f = dl / "美国服务商明细.xlsx"
+    f.write_bytes(b"x")
+    (dl / "美国服务商明细.backup-20261120.xlsx").write_bytes(b"x")   # 同目录含名文件
+    # 精确同名命中（备份文件不干扰）
+    assert resolve_statement_path("美国服务商明细.xlsx", [dl]) == f
+    # 完整路径直接用
+    assert resolve_statement_path(str(f), [dl]) == f
+    # 只给文件名（无扩展名）→ 唯一模糊命中
+    f2 = dl / "11月服务商明细.xlsx"
+    f2.write_bytes(b"x")
+    assert resolve_statement_path("11月服务商明细", [dl]) == f2
+    # 多个模糊命中 → 列候选
+    import pytest
+    with pytest.raises(ValueError, match="多个候选"):
+        resolve_statement_path("服务商明细", [dl])
+    # 找不到 → 报错带目录清单
+    with pytest.raises(ValueError, match="找不到明细 Excel"):
+        resolve_statement_path("不存在.xlsx", [dl])
+    # ~$ 临时文件忽略
+    (dl / "~$美国服务商明细.xlsx").write_bytes(b"x")
+    assert resolve_statement_path("美国服务商明细.xlsx", [dl]) == f
+
+
 def test_archive_pdf_idempotent(tmp_path):
     """全局内容去重（用户口径：不要重复发票）——同一份发票全目录只存一份。"""
     from gofreight_ap.cardispatch import archive_pdf, preload_seen

@@ -180,8 +180,15 @@ def cmd_cardispatch(args) -> int:
     """卡派发票对账归档：Excel → 逐 TK 读 GoFreight 应付核对金额 → 下载发票附件归档。
     只读核对 + 下载，绝不写 GoFreight 数据。"""
     from .cardispatch import (annotate_excel, probe_tk, read_statement,
-                              run_cardispatch, write_report)
-    rows, bad = read_statement(args.excel)
+                              resolve_statement_path, run_cardispatch,
+                              write_report)
+    try:
+        excel = resolve_statement_path(args.excel)
+    except ValueError as e:
+        print(f"明细表定位失败：{e}")
+        return 2
+    print(f"明细表：{excel}")
+    rows, bad = read_statement(excel)
     for no, why in bad:
         print(f"  ⚠ 第 {no} 行跳过：{why}")
     if args.tk:
@@ -224,7 +231,7 @@ def cmd_cardispatch(args) -> int:
           f"无附件 {n('NO_PDF')} / 读取失败 {n('READ_FAIL')} / 异常 {n('FAIL')}")
     print(f"对账清单：{report}")
     try:
-        src, bak = annotate_excel(args.excel, results, rows)
+        src, bak = annotate_excel(excel, results, rows)
         print(f"原 Excel 已标注：{src}（备份 {bak.name}）")
     except Exception as e:  # noqa: BLE001 — 标注失败不吞对账结果
         print(f"⚠ 原 Excel 标注失败：{str(e)[:120]}（结果看对账清单）")

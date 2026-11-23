@@ -105,6 +105,39 @@ def read_statement(path) -> Tuple[List[StmtRow], List[Tuple[int, str]]]:
     return rows, bad
 
 
+def resolve_statement_path(raw: str, search_dirs: Optional[List[Path]] = None) -> Path:
+    """明细 Excel 路径解析（v1.5.8）：完整/相对路径存在则直接用；只给文件名时在
+    当前目录 → 桌面 → 下载 → 文档（含 OneDrive 重定向）找 .xlsx——**精确同名优先，
+    其次名字包含**；唯一命中即用，多个/找不到报 ValueError 列出候选或目录。
+    ~$ 临时文件忽略。search_dirs 供测试注入。"""
+    p = Path(raw).expanduser()
+    if p.is_file():
+        return p
+    name = p.name.lower()
+    if search_dirs is None:
+        home = Path.home()
+        search_dirs = [Path.cwd(), home / "Desktop", home / "Downloads",
+                       home / "Documents", home / "OneDrive" / "Desktop",
+                       home / "OneDrive" / "Documents"]
+    found = [f for d in search_dirs if d.is_dir()
+             for f in sorted(d.glob("*.xlsx"))
+             if not f.name.startswith("~$")]
+    exact = [f for f in found if f.name.lower() == name]
+    if len(exact) == 1:
+        return exact[0]
+    part = {str(f).lower(): f for f in found if name in f.name.lower()}
+    cands = exact + [f for f in part.values() if f not in exact]
+    if len(cands) == 1:
+        return cands[0]
+    if not cands:
+        raise ValueError(
+            f"找不到明细 Excel {raw!r}（找过 "
+            f"{', '.join(str(d) for d in search_dirs if d.is_dir())}）；"
+            f"请给完整路径，或把文件放到上面任一目录")
+    raise ValueError("找到多个候选明细 Excel，请用完整路径指定其一：\n" +
+                     "\n".join(f"  {c}" for c in cands))
+
+
 def archive_pdf(body: bytes, vendor: str, day: date, out: Path,
                 used: set, seen: Dict) -> str:
     """归档一份 PDF（幂等 + **全局内容去重**，用户口径 2026-11-20「不要重复发票」）：
