@@ -179,11 +179,12 @@ def cmd_memo(args) -> int:
 def cmd_cardispatch(args) -> int:
     """卡派发票对账归档：Excel → 逐 TK 读 GoFreight 应付核对金额 → 下载发票附件归档。
     只读核对 + 下载，绝不写 GoFreight 数据。"""
-    from .cardispatch import (annotate_excel, probe_tk, read_statement,
-                              resolve_statement_path, run_cardispatch,
-                              write_report)
+    from .cardispatch import (annotate_excel, discover_statement_path, probe_tk,
+                              read_statement, resolve_statement_path,
+                              run_cardispatch, write_report)
     try:
-        excel = resolve_statement_path(args.excel)
+        excel = (resolve_statement_path(args.excel) if args.excel
+                 else discover_statement_path())   # 省略参数=自动发现最新明细表
     except ValueError as e:
         print(f"明细表定位失败：{e}")
         return 2
@@ -276,7 +277,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     _add_filters(sp)
 
     sp = sub.add_parser("cardispatch", help="卡派发票对账归档（Excel→核对GoFreight应付→附件归档）")
-    sp.add_argument("excel", help="服务商明细 Excel 路径（格式同 美国服务商明细.xlsx）")
+    sp.add_argument("excel", nargs="?", default=None,
+                    help="服务商明细 Excel（可省略：自动发现最新的《服务商明细》表；"
+                         "也可给文件名或完整路径）")
     sp.add_argument("--yes", action="store_true", help="确认执行（缺省只出计划）")
     sp.add_argument("--out", default="D:/卡派发票", help="附件归档目录（默认 D:/卡派发票）")
     sp.add_argument("--probe", action="store_true",

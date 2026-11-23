@@ -43,9 +43,11 @@ agent_created: true
   ②`gofreight_ap plan` 出清单 → ③**用户确认一句后**才 `submit --yes` → ④收尾汇报
   （口径与流程见 `references/建立应付指引.md`）
 - 业务说「卡派对账 / 对账归档 / 服务商明细对账 / 把卡派发票下下来」→
-  `gofreight_ap cardispatch <excel路径>` 先出核对计划（每个 TK 一行）→ **用户确认后**
+  `gofreight_ap cardispatch`（**Excel 参数可以整个省略**：工具自动发现最新的《服务商明细》
+  表——当前目录/桌面/下载/文档里名字含「服务商明细」的 .xlsx，排除备份和对账结果变体，
+  取最近修改的一份，计划首行写明用的是哪份）先出核对计划（每个 TK 一行）→ **用户确认后**
   加 `--yes` 执行：逐 TK 只读核对 GoFreight 应付金额、下载发票附件归档、结果标注回原
-  Excel（口径与输出解读见 `references/卡派对账指引.md`）
+  Excel（业务给了文件名/路径就传给命令；口径与输出解读见 `references/卡派对账指引.md`）
 - 业务说「还没应用 / 怎么申请应用 / 要权限」→ 按 `references/应用申请指引.md` 分步引导
   （建应用 → 添加机器人能力 → 开 6 个权限（见指引第 2 步权限表）→ 发布审批 →
   可用范围加自己 → 管理员加文档应用；全程不要替业务保管/回显 App Secret）
@@ -61,7 +63,7 @@ agent_created: true
 
 > 请用【邮件同步 SKILL】跑一轮同步。
 > 请用【邮件同步 SKILL】出一份建立应付清单。　（这一句=全链：先同步最新邮件→出清单→你确认后才真提交）
-> 请用【邮件同步 SKILL】对 美国服务商明细.xlsx 跑一轮卡派对账归档。
+> 请用【邮件同步 SKILL】跑一轮卡派对账归档。　（一句话零参数：明细表自动用最新的那份，计划里写明用的哪个文件）
 > 请用【邮件同步 SKILL】帮我填好配置，再检查一遍是不是都能正常用。
 
 ## 三、环境要求
@@ -159,7 +161,7 @@ python_venv/Scripts/python -m gofreight_ap --env-file .env cardispatch 美国服
 | `gofreight_ap submit --yes --dry` | 只填表单不点储存（联调） | 几乎不用 |
 | `gofreight_ap memo` | 给**已记账**的行补传发票备忘录（不带 `--yes` 只出计划；不动应付） | submit 时备忘录失败的行、补历史欠账时 |
 | `gofreight_ap mark --invoice N --tk TK-x` | 手工补记「已建立应付」进防重账本 | 管理员告知某笔已录过时 |
-| `gofreight_ap cardispatch <excel>` | 读《服务商明细》Excel → 逐 TK 读 GoFreight 应付**核对金额** → 下载发票附件归档（**只从 GoFreight 取**：会计页「文件中心」优先→备忘录兜底；不带 `--yes` 只出计划；**只读核对+下载，不写 GoFreight**）。Excel **只给文件名也行**：自动在 当前目录/桌面/下载/文档 定位（精确同名优先，其次名字包含；唯一命中即用，多个/找不到会列出候选要完整路径） | 每轮卡派对账归档 |
+| `gofreight_ap cardispatch [excel]` | 读《服务商明细》Excel → 逐 TK 读 GoFreight 应付**核对金额** → 下载发票附件归档（**只从 GoFreight 取**：会计页「文件中心」优先→备忘录兜底；不带 `--yes` 只出计划；**只读核对+下载，不写 GoFreight**）。**Excel 参数可省略**（v1.5.9）：自动发现最新的《服务商明细》表（当前目录/桌面/下载/文档，排除备份/对账结果变体取最近修改）；给了参数则按文件名自动定位或完整路径直用 | 每轮卡派对账归档 |
 | `gofreight_ap cardispatch <excel> --yes [--out D:/卡派发票]` | 真执行：附件按 `服务商_当天日期.pdf` 归档（重名自动 _02/_03；**同一份发票 md5 全目录只存一份**），对账清单落 `runtime-outputs/cardispatch/`，**结果标注回原 Excel**（发票金额←PDF识别 / 发票情况 / 对账问题 三列，**不加底色**；先自动备份 .backup-时间戳，原文件被占用时自动落 `_对账标注` 副本） | 用户确认计划后 |
 | `gofreight_ap cardispatch <excel> --probe --tk TK-x` | 单 TK dump 应付区表头/行 + 备忘录附件原始字段 | **首次使用前**（控件定稿）/ 读取失败时 |
 | 命令前加全局 `--dry-run`（lark_mail_sync）/ 过滤参数 `--invoice`/`--tk`/`--limit`（gofreight_ap） | 只打印将做什么 / 缩小本轮范围 | 业务想先看一眼或分批录时 |

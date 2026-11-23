@@ -138,6 +138,32 @@ def resolve_statement_path(raw: str, search_dirs: Optional[List[Path]] = None) -
                      "\n".join(f"  {c}" for c in cands))
 
 
+_DISCOVER_KEY = "服务商明细"
+_DISCOVER_EXCLUDE = (".backup-", "对账结果", "对账标注")
+
+
+def discover_statement_path(search_dirs: Optional[List[Path]] = None) -> Path:
+    """省略 Excel 参数时自动发现明细表（v1.5.9）：常见目录（当前目录→桌面→下载→文档，
+    含 OneDrive 重定向）里名字含「服务商明细」的 .xlsx，排除 备份/对账结果/对账标注/
+    ~$ 变体，取**最近修改**的一份；找不到报 ValueError（提示放文件或写文件名）。
+    发现结果由计划首行明确打印，确认计划时把关。search_dirs 供测试注入。"""
+    if search_dirs is None:
+        home = Path.home()
+        search_dirs = [Path.cwd(), home / "Desktop", home / "Downloads",
+                       home / "Documents", home / "OneDrive" / "Desktop",
+                       home / "OneDrive" / "Documents"]
+    cands = [f for d in search_dirs if d.is_dir()
+             for f in sorted(d.glob("*.xlsx"))
+             if _DISCOVER_KEY in f.name and not f.name.startswith("~$")
+             and not any(x in f.name for x in _DISCOVER_EXCLUDE)]
+    if not cands:
+        raise ValueError(
+            "没找到《服务商明细》Excel（找过 "
+            f"{', '.join(str(d) for d in search_dirs if d.is_dir())}）；"
+            "把明细表放到桌面/下载/文档任一目录，或把文件名/完整路径写进话术里")
+    return max(cands, key=lambda f: f.stat().st_mtime)
+
+
 def archive_pdf(body: bytes, vendor: str, day: date, out: Path,
                 used: set, seen: Dict) -> str:
     """归档一份 PDF（幂等 + **全局内容去重**，用户口径 2026-11-20「不要重复发票」）：

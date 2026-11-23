@@ -260,6 +260,34 @@ def test_resolve_statement_path(tmp_path, monkeypatch):
     assert resolve_statement_path("美国服务商明细.xlsx", [dl]) == f
 
 
+def test_discover_statement_path(tmp_path, monkeypatch):
+    """v1.5.9：省略 Excel 参数 → 自动发现最新《服务商明细》表，排除备份/对账结果变体。"""
+    import os
+
+    import pytest
+
+    from gofreight_ap.cardispatch import discover_statement_path
+    monkeypatch.chdir(tmp_path)
+    dl = tmp_path / "Downloads"
+    dl.mkdir()
+    old = dl / "美国服务商明细.xlsx"
+    old.write_bytes(b"x")
+    base = old.stat().st_mtime
+    (dl / "美国服务商明细.backup-20261120.xlsx").write_bytes(b"x")   # 备份变体排除
+    (dl / "美国服务商明细-对账结果.xlsx").write_bytes(b"x")          # 结果变体排除
+    (dl / "美国服务商明细_对账标注.xlsx").write_bytes(b"x")          # 标注副本排除
+    new = dl / "11月服务商明细.xlsx"
+    new.write_bytes(b"x")
+    os.utime(new, (base + 100, base + 100))
+    # 取最新的一份；变体与无关名文件不掺
+    assert discover_statement_path([dl]) == new
+    (dl / "无关表.xlsx").write_bytes(b"x")
+    assert discover_statement_path([dl]) == new
+    # 找不到 → 报错带目录清单和放文件提示
+    with pytest.raises(ValueError, match="没找到《服务商明细》"):
+        discover_statement_path([tmp_path / "empty"])
+
+
 def test_archive_pdf_idempotent(tmp_path):
     """全局内容去重（用户口径：不要重复发票）——同一份发票全目录只存一份。"""
     from gofreight_ap.cardispatch import archive_pdf, preload_seen
